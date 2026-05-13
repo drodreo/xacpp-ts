@@ -1,0 +1,44 @@
+{
+  "name": "xacpp",
+  "version": "1.0.0",
+  "description": "Agent Control Plane Protocol — TypeScript implementation",
+  "keywords": [
+    "xacpp",
+    "acpp",
+    "protocol",
+    "communication",
+    "peer"
+  ],
+  "author": "drodreo",
+  "license": "MIT",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.mjs",
+  "types": "./dist/esm/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/esm/index.mjs"
+      },
+      "require": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "rslib build",
+    "prepublishOnly": "rslib build",
+    "test": "vitest run"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "devDependencies": {
+    "@rslib/core": "^0.21.5",
+    "@types/node": "^25.7.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
+  }
+}
