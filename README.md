@@ -1,5 +1,7 @@
 # xacpp
 
+[中文](./README.zh-CN.md)
+
 Agent Control Plane Protocol — TypeScript implementation.
 
 xacpp defines the communication protocol between an agent and its peers. It provides a layered architecture for request-response messaging with session management over multiple transport backends.
