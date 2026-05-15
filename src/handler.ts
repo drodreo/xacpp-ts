@@ -9,7 +9,7 @@
 
 import type { XacppTransport } from "./transport";
 import type { XacppCommand } from "./commands";
-import type { XacppEvent } from "./events";
+import type { XacppActivityEvent } from "./events";
 import type { XacppResponse } from "./message";
 
 // ---- Session Handler ----
@@ -23,7 +23,7 @@ export interface XacppSessionHandler {
   onCommand(command: XacppCommand): Promise<XacppResponse>;
 
   /** Handle Event. */
-  onEvent(event: XacppEvent): Promise<XacppResponse>;
+  onEvent(event: XacppActivityEvent): Promise<XacppResponse>;
 }
 
 // ---- Establish Handler ----
@@ -33,6 +33,17 @@ export interface XacppSessionHandler {
  * Called by the responder when receiving an Establish command from the peer.
  * The developer performs credential validation, creates and holds a Session (for subsequent proactive sends),
  * creates a SessionHandler and returns it. Returning reject denies the handshake.
+ *
+ * ## Identity Contract
+ *
+ * `credentials` is an identity **anchor** — it never carries user/agent identity directly.
+ * Both sides maintain their own internal identity mapping:
+ *
+ * - On first connection (`credentials === null`): the responder performs a trust process,
+ *   internally associates this connection with a specific user and agent, then issues credentials
+ *   as an opaque handle to that identity. Neither side transmits user/agent over the wire.
+ * - On subsequent connections: the initiator presents saved credentials, the responder looks up
+ *   the previously associated identity and routes accordingly.
  */
 export interface EstablishHandler {
   /**

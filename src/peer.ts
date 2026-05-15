@@ -36,7 +36,7 @@
 
 import type { XacppTransport } from "./transport";
 import type { XacppCommand } from "./commands";
-import type { XacppEvent } from "./events";
+import type { XacppActivityEvent } from "./events";
 import type { XacppRequest, XacppResponse } from "./message";
 import { XacppError } from "./message";
 import type { EstablishHandler, XacppSessionHandler } from "./handler";
@@ -165,7 +165,7 @@ export class XacppPeer {
   }
 
   /** Send interactive event and wait for response (no session context). */
-  async requestEvent(sessionId: string | null, event: XacppEvent): Promise<XacppResponse> {
+  async requestEvent(sessionId: string | null, event: XacppActivityEvent): Promise<XacppResponse> {
     return this.transport.send(sessionId, { kind: "event", payload: event });
   }
 }

@@ -55,6 +55,6 @@ export interface SecurityAlertEvent {
 /** SubActivity 任务启动事件载荷。 */
 export interface ActivityStartEvent {
   goal: string;
-  activityId: string;
+  activity: string;
   metadata?: Record<string, string>;
 }

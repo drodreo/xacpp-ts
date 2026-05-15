@@ -21,7 +21,7 @@ import type {
   ActionResponse,
   QuestionResponse,
   SensitiveInfoOperationResponse,
-  XacppEvent,
+  XacppActivityEvent,
 } from "./events";
 
 // ---- Protocol errors ----
@@ -83,7 +83,7 @@ export class XacppError extends Error {
 /** Request payload. Accepted by Transport's `send` method. */
 export type XacppRequest =
   | { kind: "command"; payload: XacppCommand }
-  | { kind: "event"; payload: XacppEvent };
+  | { kind: "event"; payload: XacppActivityEvent };
 
 /** Response payload. Returned by Transport's `send` method. */
 export type XacppResponse =
@@ -97,6 +97,8 @@ export type XacppResponse =
   | { kind: "question"; requestId: string } & QuestionResponse
   /** Sensitive info operation response (flatten: response fields spread to top level). */
   | { kind: "sensitive_info_operation"; requestId: string } & SensitiveInfoOperationResponse
+  /** Activity created. */
+  | { kind: "activity_created"; activity: string; agent: string; title?: string }
   /** Generic acknowledge: request processed successfully, no data returned. */
   | { kind: "acknowledge" }
   /** Processing failure. */
