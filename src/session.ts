@@ -18,13 +18,13 @@ import type { XacppRequest, XacppResponse } from "./message";
 export class XacppSession {
   private transport: XacppTransport;
   private _sessionId: string;
-  private _credentials: string | null;
+  private _credentials: string;
 
   /** @internal Created by XacppPeer.establish. */
   constructor(
     transport: XacppTransport,
     sessionId: string,
-    credentials: string | null,
+    credentials: string,
   ) {
     this.transport = transport;
     this._sessionId = sessionId;
@@ -41,7 +41,7 @@ export class XacppSession {
    *
    * Caller can save them for use in subsequent `establish` calls.
    */
-  get credentials(): string | null {
+  get credentials(): string {
     return this._credentials;
   }
 

@@ -198,6 +198,7 @@ describe("XacppEnvelope serialization", () => {
       payload: {
         kind: "established",
         sessionId: "s1",
+        credentials: "test-creds",
       },
     };
 

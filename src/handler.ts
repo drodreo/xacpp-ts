@@ -19,7 +19,7 @@ export type EstablishDecision =
   /** First connection: challenge required → responder returns establish_prepare. */
   | { type: "challenge_required"; challenge: string }
   /** Credentials valid: direct establishment → responder returns established. */
-  | { type: "established"; sessionId: string; handler: XacppSessionHandler };
+  | { type: "established"; sessionId: string; handler: XacppSessionHandler; credentials: string };
 
 // ---- Session Handler ----
 
@@ -48,7 +48,7 @@ export interface XacppSessionHandler {
  * `credentials` is an identity **anchor** — it never carries user/agent identity directly.
  * Both sides maintain their own internal identity mapping:
  *
- * - On first connection (`credentials === null`): the responder performs a trust process,
+ * - On first connection (`!credentials`): the responder performs a trust process,
  *   internally associates this connection with a specific user and agent, then issues credentials
  *   as an opaque handle to that identity. Neither side transmits user/agent over the wire.
  * - On subsequent connections: the initiator presents saved credentials, the responder looks up
@@ -65,11 +65,11 @@ export interface EstablishHandler {
    */
   onEstablish(
     transport: XacppTransport,
-    credentials: string | null,
+    credentials: string | undefined,
   ): Promise<EstablishDecision>;
 
   /** Phase 3: EstablishConfirm received (challenge path only). */
   onEstablishConfirm(
     transport: XacppTransport,
-  ): Promise<{ sessionId: string; handler: XacppSessionHandler }>;
+  ): Promise<{ sessionId: string; handler: XacppSessionHandler; credentials: string }>;
 }
