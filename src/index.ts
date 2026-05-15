@@ -7,4 +7,4 @@ export { XacppSession } from "./session";
 export { SocketTransport } from "./socket-transport";
 export { StdioTransport } from "./stdio-transport";
 export type { XacppTransport, RequestHandler } from "./transport";
-export type { XacppSessionHandler, EstablishHandler } from "./handler";
+export type { XacppSessionHandler, EstablishHandler, EstablishDecision } from "./handler";
