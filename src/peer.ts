@@ -95,13 +95,13 @@ export class XacppPeer {
             }
             // decision.type === "established"
             sessions.set(decision.sessionId, decision.handler);
-            return { kind: "established" as const, sessionId: decision.sessionId, credentials: undefined };
+            return { kind: "established" as const, sessionId: decision.sessionId, credentials: decision.credentials };
           }
           if (payload.kind === "command" && payload.payload === "establish_confirm") {
             // Establish confirm (phase 3 of 3-way handshake)
             const result = await establishHandler.onEstablishConfirm(transport);
             sessions.set(result.sessionId, result.handler);
-            return { kind: "established" as const, sessionId: result.sessionId, credentials: undefined };
+            return { kind: "established" as const, sessionId: result.sessionId, credentials: result.credentials };
           }
           throw XacppError.invalidRequest("missing session_id");
         }
@@ -132,7 +132,7 @@ export class XacppPeer {
    * Handler is registered in Peer routing table; Session is responsible for sending.
    */
   async establish(
-    credentials: string | null,
+    credentials: string | undefined,
     handler: XacppSessionHandler,
     verifyChallenge: (challenge: string) => void,
   ): Promise<XacppSession> {
@@ -146,7 +146,7 @@ export class XacppPeer {
       return new XacppSession(
         this.transport,
         response.sessionId,
-        response.credentials ?? null,
+        response.credentials,
       );
     }
 
@@ -162,7 +162,7 @@ export class XacppPeer {
         return new XacppSession(
           this.transport,
           confirmResponse.sessionId,
-          confirmResponse.credentials ?? null,
+          confirmResponse.credentials,
         );
       }
 

@@ -88,7 +88,7 @@ export type XacppRequest =
 /** Response payload. Returned by Transport's `send` method. */
 export type XacppResponse =
   /** Handshake success: issues session identifier and credentials. */
-  | { kind: "established"; sessionId: string; credentials?: string }
+  | { kind: "established"; sessionId: string; credentials: string }
   /** Challenge issued during first-time establishment. */
   | { kind: "establish_prepare"; challenge: string }
   /** Handshake rejected. */

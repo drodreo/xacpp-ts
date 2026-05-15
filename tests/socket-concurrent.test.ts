@@ -97,7 +97,7 @@ describe("SocketTransport concurrent", () => {
     const handler: RequestHandler = async (_sessionId, payload) => {
       await new Promise((r) => setTimeout(r, 10));
       const sid = commandTag(payload);
-      return { kind: "established", sessionId: sid };
+      return { kind: "established", sessionId: sid, credentials: `creds-${sid}` };
     };
     const { client, cleanup } = await socketPair(handler);
 
@@ -141,7 +141,7 @@ describe("SocketTransport concurrent", () => {
     // Server handler: return 1KB text
     const largeContent = "A".repeat(1024);
     const handler: RequestHandler = async (_sessionId, _payload) => {
-      return { kind: "established", sessionId: largeContent };
+      return { kind: "established", sessionId: largeContent, credentials: largeContent };
     };
     const { client, cleanup } = await socketPair(handler);
 

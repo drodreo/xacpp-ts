@@ -32,21 +32,21 @@ class TestSessionHandler implements XacppSessionHandler {
 /** Auto-approves Establish and returns TestSessionHandler. */
 class AutoApproveEstablishHandler implements EstablishHandler {
   async onEstablish(_transport: XacppTransport, _credentials: string | null): Promise<EstablishDecision> {
-    return { type: "established", sessionId: "auto-sid", handler: new TestSessionHandler() };
+    return { type: "established", sessionId: "auto-sid", credentials: "auto-creds", handler: new TestSessionHandler() };
   }
-  async onEstablishConfirm(_transport: XacppTransport): Promise<{ sessionId: string; handler: XacppSessionHandler }> {
-    return { sessionId: "auto-sid", handler: new TestSessionHandler() };
+  async onEstablishConfirm(_transport: XacppTransport): Promise<{ sessionId: string; handler: XacppSessionHandler; credentials: string }> {
+    return { sessionId: "auto-sid", handler: new TestSessionHandler(), credentials: "auto-creds" };
   }
 }
 
 /** Identified Session handler: identifies itself via sessionId in responses. */
 class IdentifiedHandler implements XacppSessionHandler {
-  constructor(private id: string) {}
+  constructor(private id: string, private creds: string) {}
   async onCommand(): Promise<XacppResponse> {
-    return { kind: "established", sessionId: this.id };
+    return { kind: "established", sessionId: this.id, credentials: this.creds };
   }
   async onEvent(_event: XacppActivityEvent): Promise<XacppResponse> {
-    return { kind: "established", sessionId: this.id };
+    return { kind: "established", sessionId: this.id, credentials: this.creds };
   }
 }
 
@@ -56,16 +56,16 @@ class SequencedEstablishHandler implements EstablishHandler {
   async onEstablish(_transport: XacppTransport, _credentials: string | null): Promise<EstablishDecision> {
     const n = ++this.counter;
     const sid = `handler-${n}`;
-    return { type: "established", sessionId: sid, handler: new IdentifiedHandler(sid) };
+    return { type: "established", sessionId: sid, credentials: `creds-${n}`, handler: new IdentifiedHandler(sid, `creds-${n}`) };
   }
-  async onEstablishConfirm(_transport: XacppTransport): Promise<{ sessionId: string; handler: XacppSessionHandler }> {
+  async onEstablishConfirm(_transport: XacppTransport): Promise<{ sessionId: string; handler: XacppSessionHandler; credentials: string }> {
     const n = ++this.counter;
     const sid = `handler-${n}`;
-    return { sessionId: sid, handler: new IdentifiedHandler(sid) };
+    return { sessionId: sid, handler: new IdentifiedHandler(sid, `creds-${n}`), credentials: `creds-${n}` };
   }
 }
 
-/** Challenge-aware handler: onEstablish returns challenge_required, onEstablishConfirm returns (sid, handler). */
+/** Challenge-aware handler: onEstablish returns challenge_required, onEstablishConfirm returns (sid, handler, credentials). */
 class ChallengeEstablishHandler implements EstablishHandler {
   async onEstablish(
     _transport: XacppTransport,
@@ -76,8 +76,8 @@ class ChallengeEstablishHandler implements EstablishHandler {
 
   async onEstablishConfirm(
     _transport: XacppTransport,
-  ): Promise<{ sessionId: string; handler: XacppSessionHandler }> {
-    return { sessionId: "challenge-sid", handler: new TestSessionHandler() };
+  ): Promise<{ sessionId: string; handler: XacppSessionHandler; credentials: string }> {
+    return { sessionId: "challenge-sid", handler: new TestSessionHandler(), credentials: "issued-creds" };
   }
 }
 
@@ -264,7 +264,7 @@ describe("Transport send", () => {
         typeof payload.payload === "object" &&
         "establish" in payload.payload
       ) {
-        return Promise.resolve({ kind: "established" as const, sessionId: "sid-1" });
+        return Promise.resolve({ kind: "established" as const, sessionId: "sid-1", credentials: "test-creds" });
       }
       return Promise.resolve({ kind: "acknowledge" });
     });
@@ -404,10 +404,10 @@ describe("Transport send", () => {
     const [transportA, transportB] = duplexPair();
 
     transportA.onRequest(() =>
-      Promise.resolve({ kind: "established" as const, sessionId: "from-a" }),
+      Promise.resolve({ kind: "established" as const, sessionId: "from-a", credentials: "creds-a" }),
     );
     transportB.onRequest(() =>
-      Promise.resolve({ kind: "established" as const, sessionId: "from-b" }),
+      Promise.resolve({ kind: "established" as const, sessionId: "from-b", credentials: "creds-b" }),
     );
 
     await transportA.connect();
@@ -456,7 +456,7 @@ describe("Peer", () => {
     const session = await timeout(peerA.establish(null, handler, () => {}));
 
     expect(session.sessionId).toBeTruthy();
-    expect(session.credentials).toBeNull();
+    expect(session.credentials).toBe("auto-creds");
   });
 
   it("session request command", async () => {
@@ -547,7 +547,7 @@ describe("Concurrent", () => {
 
     transportB.onRequest((_sessionId, payload) => {
       // Return different sessionId based on command type, for verifying correct matching
-      let sid: string;
+      let sid: string = "other";
       if (payload.kind === "command") {
         const cmd = payload.payload;
         if (typeof cmd === "object" && "establish" in cmd) sid = "establish";
@@ -558,7 +558,7 @@ describe("Concurrent", () => {
       } else {
         sid = "event";
       }
-      return Promise.resolve({ kind: "established" as const, sessionId: sid });
+      return Promise.resolve({ kind: "established" as const, sessionId: sid, credentials: `creds-${sid}` });
     });
 
     await transportA.connect();
@@ -653,5 +653,33 @@ describe("Challenge handshake", () => {
 
     expect(challengeReceived).toBe(true);
     expect(session.sessionId).toBe("challenge-sid");
+  });
+
+  it("establish challenge issues credentials", async () => {
+    const [transportA, transportB] = duplexPair();
+    const peerA = new XacppPeer(transportA, new ChallengeEstablishHandler());
+    const peerB = new XacppPeer(transportB, new ChallengeEstablishHandler());
+    await peerA.connect();
+    await peerB.connect();
+
+    const session = await timeout(
+      peerA.establish(null, new TestSessionHandler(), (challenge) => {
+        expect(challenge).toBe("test-challenge");
+      }),
+    );
+
+    expect(session.sessionId).toBe("challenge-sid");
+    expect(session.credentials).toBe("issued-creds");
+  });
+
+  it("session send message", async () => {
+    const [peerA] = await connectedPeers();
+    const session = await timeout(
+      peerA.establish(null, new TestSessionHandler(), () => {}),
+    );
+    const response = await timeout(
+      session.requestCommand({ message: { content: [{ type: "text", text: "hello" }] } }),
+    );
+    expect(response.kind).toBe("acknowledge");
   });
 });
