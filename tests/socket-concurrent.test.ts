@@ -74,10 +74,16 @@ function commandTag(payload: XacppRequest): string {
   if (payload.kind !== "command") return "other";
   const cmd: XacppCommand = payload.payload;
   if (typeof cmd === "string") {
-    // "new_activity" → "new", "invoke_activity" → "invoke", etc.
+    // "invoke_activity" → "invoke", "compact_activity" → "compact", etc.
     return cmd.replace(/_activity$/, "");
   }
-  if (typeof cmd === "object" && "establish" in cmd) return "establish";
+  if (typeof cmd === "object") {
+    if ("establish" in cmd) return "establish";
+    if ("new_activity" in cmd) return "new";
+    if ("invoke_activity" in cmd) return "invoke";
+    if ("compact_activity" in cmd) return "compact";
+    if ("cancel_activity" in cmd) return "cancel";
+  }
   return "other";
 }
 
@@ -96,10 +102,10 @@ describe("SocketTransport concurrent", () => {
     const { client, cleanup } = await socketPair(handler);
 
     const commands: XacppCommand[] = [
-      "new_activity",
-      "invoke_activity",
-      "compact_activity",
-      "cancel_activity",
+      { new_activity: { title: null } },
+      { invoke_activity: { activity: "act-1", messages: [] } },
+      { compact_activity: { activity: "act-1" } },
+      { cancel_activity: { activity: "act-1" } },
       { establish: { credentials: null } },
     ];
 
@@ -141,7 +147,7 @@ describe("SocketTransport concurrent", () => {
 
     // Send 10 concurrent requests
     const promises = Array.from({ length: 10 }, () =>
-      client.send(null, { kind: "command", payload: "new_activity" }),
+      client.send(null, { kind: "command", payload: { new_activity: { title: null } } }),
     );
     const responses = await Promise.all(promises.map((p) => timeout(p)));
 
@@ -170,7 +176,7 @@ describe("SocketTransport concurrent", () => {
 
     // Send 3 requests (handler will block)
     const sendPromises = Array.from({ length: 3 }, () =>
-      client.send(null, { kind: "command", payload: "new_activity" }),
+      client.send(null, { kind: "command", payload: { new_activity: { title: null } } }),
     );
 
     // Wait to ensure requests have been sent and received by handler

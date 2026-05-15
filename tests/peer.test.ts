@@ -13,7 +13,7 @@ import type { XacppRequest, XacppResponse } from "../src/message";
 import { XacppError } from "../src/message";
 import type { XacppTransport, RequestHandler } from "../src/transport";
 import type { XacppCommand } from "../src/commands";
-import type { XacppEvent } from "../src/events";
+import type { XacppActivityEvent } from "../src/events";
 import type { XacppSessionHandler, EstablishHandler } from "../src/handler";
 import { XacppPeer, PeerState } from "../src/peer";
 
@@ -24,7 +24,7 @@ class TestSessionHandler implements XacppSessionHandler {
   async onCommand(): Promise<XacppResponse> {
     return { kind: "acknowledge" };
   }
-  async onEvent(): Promise<XacppResponse> {
+  async onEvent(_event: XacppActivityEvent): Promise<XacppResponse> {
     return { kind: "acknowledge" };
   }
 }
@@ -42,7 +42,7 @@ class IdentifiedHandler implements XacppSessionHandler {
   async onCommand(): Promise<XacppResponse> {
     return { kind: "established", sessionId: this.id };
   }
-  async onEvent(): Promise<XacppResponse> {
+  async onEvent(_event: XacppActivityEvent): Promise<XacppResponse> {
     return { kind: "established", sessionId: this.id };
   }
 }
@@ -263,7 +263,7 @@ describe("Transport send", () => {
 
   it("send event returns acknowledge", async () => {
     const [transportA, transportB] = duplexPair();
-    const received: XacppEvent[] = [];
+    const received: XacppActivityEvent[] = [];
 
     transportB.onRequest((_sessionId, payload) => {
       if (payload.kind === "event") {
@@ -278,15 +278,16 @@ describe("Transport send", () => {
     const response = await timeout(
       transportA.send("s1", {
         kind: "event",
-        payload: { type: "think", content: "hello" },
+        payload: { activity: "test-act", event: { type: "think", content: "hello" } },
       }),
     );
 
     expect(response.kind).toBe("acknowledge");
 
-    expect(received[0].type).toBe("think");
-    if (received[0].type === "think") {
-      expect(received[0].content).toBe("hello");
+    expect(received[0].activity).toBe("test-act");
+    expect(received[0].event.type).toBe("think");
+    if (received[0].event.type === "think") {
+      expect(received[0].event.content).toBe("hello");
     }
   });
 
@@ -294,10 +295,10 @@ describe("Transport send", () => {
     const [transportA, transportB] = duplexPair();
 
     transportB.onRequest((_sessionId, payload) => {
-      if (payload.kind === "event" && payload.payload.type === "action_request") {
+      if (payload.kind === "event" && payload.payload.event.type === "action_request") {
         return Promise.resolve({
           kind: "action" as const,
-          requestId: payload.payload.requestId,
+          requestId: payload.payload.event.requestId,
           type: "approve" as const,
         });
       }
@@ -311,13 +312,16 @@ describe("Transport send", () => {
       transportA.send("s1", {
         kind: "event",
         payload: {
-          type: "action_request",
-          requestId: "req-1",
-          toolName: "bash",
-          arguments: "{}",
-          actionId: "act-1",
-          description: "test",
-          alert: "info",
+          activity: "test-act",
+          event: {
+            type: "action_request",
+            requestId: "req-1",
+            toolName: "bash",
+            arguments: "{}",
+            actionId: "act-1",
+            description: "test",
+            alert: "info",
+          },
         },
       }),
     );
@@ -437,7 +441,7 @@ describe("Peer", () => {
     const handler = new TestSessionHandler();
     const session = await timeout(peerA.establish(null, handler));
 
-    const response = await timeout(session.requestCommand("new_activity"));
+    const response = await timeout(session.requestCommand({ new_activity: { title: null } }));
     expect(response.kind).toBe("acknowledge");
   });
 
@@ -448,7 +452,7 @@ describe("Peer", () => {
     const session = await timeout(peerA.establish(null, handler));
 
     const response = await timeout(
-      session.requestEvent({ type: "think", content: "hi" }),
+      session.requestEvent({ activity: "test-act", event: { type: "think", content: "hi" } }),
     );
     expect(response.kind).toBe("acknowledge");
   });
@@ -523,10 +527,10 @@ describe("Concurrent", () => {
       if (payload.kind === "command") {
         const cmd = payload.payload;
         if (typeof cmd === "object" && "establish" in cmd) sid = "establish";
-        else if (cmd === "new_activity") sid = "new";
-        else if (cmd === "invoke_activity") sid = "invoke";
-        else if (cmd === "compact_activity") sid = "compact";
-        else sid = "cancel";
+        else if (typeof cmd === "object" && cmd !== null && "new_activity" in cmd) sid = "new";
+        else if (typeof cmd === "object" && cmd !== null && "invoke_activity" in cmd) sid = "invoke";
+        else if (typeof cmd === "object" && cmd !== null && "compact_activity" in cmd) sid = "compact";
+        else if (typeof cmd === "object" && cmd !== null && "cancel_activity" in cmd) sid = "cancel";
       } else {
         sid = "event";
       }
@@ -538,10 +542,10 @@ describe("Concurrent", () => {
 
     const commands: XacppCommand[] = [
       { establish: { credentials: null } },
-      "new_activity",
-      "invoke_activity",
-      "compact_activity",
-      "cancel_activity",
+      { new_activity: { title: null } },
+      { invoke_activity: { activity: "act-1", messages: [] } },
+      { compact_activity: { activity: "act-1" } },
+      { cancel_activity: { activity: "act-1" } },
     ];
 
     // Send 5 concurrent requests
@@ -583,21 +587,21 @@ describe("Multi session routing", () => {
     expect(sid1).not.toBe(sid2);
 
     // session_1 sends command → B-side routes to handler-1 → response sessionId = "handler-1"
-    const resp1 = await timeout(session1.requestCommand("new_activity"));
+    const resp1 = await timeout(session1.requestCommand({ new_activity: { title: null } }));
     expect(resp1.kind).toBe("established");
     if (resp1.kind === "established") {
       expect(resp1.sessionId).toBe("handler-1");
     }
 
     // session_2 sends command → B-side routes to handler-2 → response sessionId = "handler-2"
-    const resp2 = await timeout(session2.requestCommand("new_activity"));
+    const resp2 = await timeout(session2.requestCommand({ new_activity: { title: null } }));
     expect(resp2.kind).toBe("established");
     if (resp2.kind === "established") {
       expect(resp2.sessionId).toBe("handler-2");
     }
 
     // Cross-validation: session_1 sends again, still routes to handler-1
-    const resp1Again = await timeout(session1.requestCommand("cancel_activity"));
+    const resp1Again = await timeout(session1.requestCommand({ cancel_activity: { activity: "act-1" } }));
     expect(resp1Again.kind).toBe("established");
     if (resp1Again.kind === "established") {
       expect(resp1Again.sessionId).toBe("handler-1");

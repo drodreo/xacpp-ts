@@ -9,3 +9,4 @@ export * from "./interaction";
 export * from "./payload";
 export * from "./upload";
 export type { XacppEvent } from "./xacpp_event";
+export type { XacppActivityEvent } from "./activity-event";

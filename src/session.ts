@@ -7,7 +7,7 @@
 
 import type { XacppTransport } from "./transport";
 import type { XacppCommand } from "./commands";
-import type { XacppEvent } from "./events";
+import type { XacppActivityEvent } from "./events";
 import type { XacppRequest, XacppResponse } from "./message";
 
 /** XACPP logical session.
@@ -51,7 +51,7 @@ export class XacppSession {
   }
 
   /** Send event and wait for response. */
-  async requestEvent(event: XacppEvent): Promise<XacppResponse> {
+  async requestEvent(event: XacppActivityEvent): Promise<XacppResponse> {
     return this.transport.send(this._sessionId, { kind: "event", payload: event });
   }
 }

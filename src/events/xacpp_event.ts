@@ -88,13 +88,13 @@ export interface ActivityStartXacppEvent extends ActivityStartEvent {
 /** SubActivity completed. */
 export interface ActivityDoneXacppEvent {
   type: "activity_done";
-  activityId: string;
+  activity: string;
 }
 
 /** SubActivity aborted. */
 export interface ActivityAbortedXacppEvent {
   type: "activity_aborted";
-  activityId: string;
+  activity: string;
   reason: string;
 }
 
