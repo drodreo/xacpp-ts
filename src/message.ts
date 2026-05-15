@@ -89,6 +89,8 @@ export type XacppRequest =
 export type XacppResponse =
   /** Handshake success: issues session identifier and credentials. */
   | { kind: "established"; sessionId: string; credentials?: string }
+  /** Challenge issued during first-time establishment. */
+  | { kind: "establish_prepare"; challenge: string }
   /** Handshake rejected. */
   | { kind: "establish_reject"; reason: string }
   /** Tool call authorization response. */

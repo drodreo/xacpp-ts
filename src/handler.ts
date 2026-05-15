@@ -12,6 +12,15 @@ import type { XacppCommand } from "./commands";
 import type { XacppActivityEvent } from "./events";
 import type { XacppResponse } from "./message";
 
+// ---- Establish Decision ----
+
+/** Decision made by the responder upon receiving an Establish request. */
+export type EstablishDecision =
+  /** First connection: challenge required → responder returns establish_prepare. */
+  | { type: "challenge_required"; challenge: string }
+  /** Credentials valid: direct establishment → responder returns established. */
+  | { type: "established"; sessionId: string; handler: XacppSessionHandler };
+
 // ---- Session Handler ----
 
 /** XACPP Session Handler interface.
@@ -50,11 +59,17 @@ export interface EstablishHandler {
    * Handle Establish request.
    *
    * `transport` is passed in by Peer, for use inside `onEstablish` to create `XacppSession`.
-   * Returns `{ sessionId, handler }`: sessionId identifies this session,
-   * handler processes inbound Command/Event for this session.
+   * Returns an {@link EstablishDecision}:
+   * - `challenge_required`: first-time connection, responder issues a challenge.
+   * - `established`: credentials valid, direct establishment with sessionId and handler.
    */
   onEstablish(
     transport: XacppTransport,
     credentials: string | null,
+  ): Promise<EstablishDecision>;
+
+  /** Phase 3: EstablishConfirm received (challenge path only). */
+  onEstablishConfirm(
+    transport: XacppTransport,
   ): Promise<{ sessionId: string; handler: XacppSessionHandler }>;
 }

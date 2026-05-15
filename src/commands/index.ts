@@ -12,6 +12,8 @@ import type { ContentPart } from "../events/content";
 export type XacppCommand =
   /** Establish logical session. */
   | { establish: { credentials: string | null } }
+  /** Confirm establishment after challenge verification (phase 3 of 3-way handshake). */
+  | "establish_confirm"
   /** Create a new Activity session. */
   | { new_activity: { title: string | null } }
   /** Invoke an existing Activity to perform an operation. */

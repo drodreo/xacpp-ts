@@ -14,7 +14,7 @@ import { XacppError } from "../src/message";
 import type { XacppTransport, RequestHandler } from "../src/transport";
 import type { XacppCommand } from "../src/commands";
 import type { XacppActivityEvent } from "../src/events";
-import type { XacppSessionHandler, EstablishHandler } from "../src/handler";
+import type { XacppSessionHandler, EstablishHandler, EstablishDecision } from "../src/handler";
 import { XacppPeer, PeerState } from "../src/peer";
 
 // ---- Test Handler implementations ----
@@ -31,7 +31,10 @@ class TestSessionHandler implements XacppSessionHandler {
 
 /** Auto-approves Establish and returns TestSessionHandler. */
 class AutoApproveEstablishHandler implements EstablishHandler {
-  async onEstablish(): Promise<{ sessionId: string; handler: XacppSessionHandler }> {
+  async onEstablish(_transport: XacppTransport, _credentials: string | null): Promise<EstablishDecision> {
+    return { type: "established", sessionId: "auto-sid", handler: new TestSessionHandler() };
+  }
+  async onEstablishConfirm(_transport: XacppTransport): Promise<{ sessionId: string; handler: XacppSessionHandler }> {
     return { sessionId: "auto-sid", handler: new TestSessionHandler() };
   }
 }
@@ -50,10 +53,31 @@ class IdentifiedHandler implements XacppSessionHandler {
 /** EstablishHandler that assigns IdentifiedHandlers in sequence. */
 class SequencedEstablishHandler implements EstablishHandler {
   private counter = 0;
-  async onEstablish(): Promise<{ sessionId: string; handler: XacppSessionHandler }> {
+  async onEstablish(_transport: XacppTransport, _credentials: string | null): Promise<EstablishDecision> {
+    const n = ++this.counter;
+    const sid = `handler-${n}`;
+    return { type: "established", sessionId: sid, handler: new IdentifiedHandler(sid) };
+  }
+  async onEstablishConfirm(_transport: XacppTransport): Promise<{ sessionId: string; handler: XacppSessionHandler }> {
     const n = ++this.counter;
     const sid = `handler-${n}`;
     return { sessionId: sid, handler: new IdentifiedHandler(sid) };
+  }
+}
+
+/** Challenge-aware handler: onEstablish returns challenge_required, onEstablishConfirm returns (sid, handler). */
+class ChallengeEstablishHandler implements EstablishHandler {
+  async onEstablish(
+    _transport: XacppTransport,
+    _credentials: string | null,
+  ): Promise<EstablishDecision> {
+    return { type: "challenge_required", challenge: "test-challenge" };
+  }
+
+  async onEstablishConfirm(
+    _transport: XacppTransport,
+  ): Promise<{ sessionId: string; handler: XacppSessionHandler }> {
+    return { sessionId: "challenge-sid", handler: new TestSessionHandler() };
   }
 }
 
@@ -429,7 +453,7 @@ describe("Peer", () => {
     const [peerA] = await connectedPeers();
 
     const handler = new TestSessionHandler();
-    const session = await timeout(peerA.establish(null, handler));
+    const session = await timeout(peerA.establish(null, handler, () => {}));
 
     expect(session.sessionId).toBeTruthy();
     expect(session.credentials).toBeNull();
@@ -439,7 +463,7 @@ describe("Peer", () => {
     const [peerA] = await connectedPeers();
 
     const handler = new TestSessionHandler();
-    const session = await timeout(peerA.establish(null, handler));
+    const session = await timeout(peerA.establish(null, handler, () => {}));
 
     const response = await timeout(session.requestCommand({ new_activity: { title: null } }));
     expect(response.kind).toBe("acknowledge");
@@ -449,7 +473,7 @@ describe("Peer", () => {
     const [peerA] = await connectedPeers();
 
     const handler = new TestSessionHandler();
-    const session = await timeout(peerA.establish(null, handler));
+    const session = await timeout(peerA.establish(null, handler, () => {}));
 
     const response = await timeout(
       session.requestEvent({ activity: "test-act", event: { type: "think", content: "hi" } }),
@@ -579,8 +603,8 @@ describe("Multi session routing", () => {
 
     // A as initiator: establish two sessions
     const handlerA = new TestSessionHandler();
-    const session1 = await timeout(peerA.establish(null, handlerA));
-    const session2 = await timeout(peerA.establish(null, handlerA));
+    const session1 = await timeout(peerA.establish(null, handlerA, () => {}));
+    const session2 = await timeout(peerA.establish(null, handlerA, () => {}));
 
     const sid1 = session1.sessionId;
     const sid2 = session2.sessionId;
@@ -606,5 +630,28 @@ describe("Multi session routing", () => {
     if (resp1Again.kind === "established") {
       expect(resp1Again.sessionId).toBe("handler-1");
     }
+  });
+});
+
+// ---- Challenge handshake tests ----
+
+describe("Challenge handshake", () => {
+  it("establish challenge flow", async () => {
+    const [transportA, transportB] = duplexPair();
+    const peerA = new XacppPeer(transportA, new ChallengeEstablishHandler());
+    const peerB = new XacppPeer(transportB, new ChallengeEstablishHandler());
+    await peerA.connect();
+    await peerB.connect();
+
+    let challengeReceived = false;
+    const session = await timeout(
+      peerA.establish(null, new TestSessionHandler(), (challenge) => {
+        expect(challenge).toBe("test-challenge");
+        challengeReceived = true;
+      }),
+    );
+
+    expect(challengeReceived).toBe(true);
+    expect(session.sessionId).toBe("challenge-sid");
   });
 });

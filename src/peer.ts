@@ -39,7 +39,7 @@ import type { XacppCommand } from "./commands";
 import type { XacppActivityEvent } from "./events";
 import type { XacppRequest, XacppResponse } from "./message";
 import { XacppError } from "./message";
-import type { EstablishHandler, XacppSessionHandler } from "./handler";
+import type { EstablishDecision, EstablishHandler, XacppSessionHandler } from "./handler";
 import { XacppSession } from "./session";
 
 /** Peer protocol state. */
@@ -89,9 +89,19 @@ export class XacppPeer {
           if (payload.kind === "command" && typeof payload.payload === "object" && "establish" in payload.payload) {
             // Establish request
             const credentials = payload.payload.establish.credentials;
-            const result = await establishHandler.onEstablish(transport, credentials);
+            const decision = await establishHandler.onEstablish(transport, credentials);
+            if (decision.type === "challenge_required") {
+              return { kind: "establish_prepare" as const, challenge: decision.challenge };
+            }
+            // decision.type === "established"
+            sessions.set(decision.sessionId, decision.handler);
+            return { kind: "established" as const, sessionId: decision.sessionId, credentials: undefined };
+          }
+          if (payload.kind === "command" && payload.payload === "establish_confirm") {
+            // Establish confirm (phase 3 of 3-way handshake)
+            const result = await establishHandler.onEstablishConfirm(transport);
             sessions.set(result.sessionId, result.handler);
-            return { kind: "established" as const, sessionId: result.sessionId };
+            return { kind: "established" as const, sessionId: result.sessionId, credentials: undefined };
           }
           throw XacppError.invalidRequest("missing session_id");
         }
@@ -124,6 +134,7 @@ export class XacppPeer {
   async establish(
     credentials: string | null,
     handler: XacppSessionHandler,
+    verifyChallenge: (challenge: string) => void,
   ): Promise<XacppSession> {
     const response = await this.transport.send(null, {
       kind: "command",
@@ -137,6 +148,33 @@ export class XacppPeer {
         response.sessionId,
         response.credentials ?? null,
       );
+    }
+
+    if (response.kind === "establish_prepare") {
+      verifyChallenge(response.challenge);
+      const confirmResponse = await this.transport.send(null, {
+        kind: "command",
+        payload: "establish_confirm",
+      });
+
+      if (confirmResponse.kind === "established") {
+        this.sessions.set(confirmResponse.sessionId, handler);
+        return new XacppSession(
+          this.transport,
+          confirmResponse.sessionId,
+          confirmResponse.credentials ?? null,
+        );
+      }
+
+      if (confirmResponse.kind === "establish_reject") {
+        throw XacppError.establishReject(confirmResponse.reason);
+      }
+
+      if (confirmResponse.kind === "error") {
+        throw XacppError.application(confirmResponse.code, confirmResponse.message);
+      }
+
+      throw XacppError.internal(`unexpected response to establish_confirm: ${JSON.stringify(confirmResponse)}`);
     }
 
     if (response.kind === "establish_reject") {
