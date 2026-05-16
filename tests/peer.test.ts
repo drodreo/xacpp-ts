@@ -555,6 +555,9 @@ describe("Concurrent", () => {
         else if (typeof cmd === "object" && cmd !== null && "invoke_activity" in cmd) sid = "invoke";
         else if (typeof cmd === "object" && cmd !== null && "compact_activity" in cmd) sid = "compact";
         else if (typeof cmd === "object" && cmd !== null && "cancel_activity" in cmd) sid = "cancel";
+        else if (typeof cmd === "object" && cmd !== null && "list_activity" in cmd) sid = "list";
+        else if (typeof cmd === "object" && cmd !== null && "switch_activity" in cmd) sid = "switch";
+        else if (cmd === "last_activity") sid = "last";
       } else {
         sid = "event";
       }
@@ -570,6 +573,9 @@ describe("Concurrent", () => {
       { invoke_activity: { activity: "act-1", messages: [] } },
       { compact_activity: { activity: "act-1" } },
       { cancel_activity: { activity: "act-1" } },
+      "last_activity",
+      { list_activity: { pageNum: 1, pageSize: 10 } },
+      { switch_activity: { activity: "act-1" } },
     ];
 
     // Send 5 concurrent requests
@@ -584,9 +590,9 @@ describe("Concurrent", () => {
       return "";
     });
 
-    // All 5 distinct sids received, no duplicates or losses
+    // All 8 distinct sids received, no duplicates or losses
     const sorted = [...sids].sort();
-    expect(sorted).toEqual(["cancel", "compact", "establish", "invoke", "new"]);
+    expect(sorted).toEqual(["cancel", "compact", "establish", "invoke", "last", "list", "new", "switch"]);
   });
 });
 

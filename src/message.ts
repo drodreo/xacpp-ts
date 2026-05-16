@@ -11,8 +11,8 @@
  * ## JSON format examples
  *
  * ```json
- * Request (Command): {"id":"r1","type":"request","payload":{"kind":"command","payload":{"establish":{"credentials":null}}}}
- * Response (Established): {"id":"r1","type":"response","payload":{"kind":"established","sessionId":"s1"}}
+ * Request (Command): {"id":"r1","type":"request","payload":{"kind":"command","payload":{"establish":{}}}}
+ * Response (Established): {"id":"r1","type":"response","payload":{"kind":"established","sessionId":"s1","credentials":"issued-creds"}}
  * ```
  */
 
@@ -78,6 +78,15 @@ export class XacppError extends Error {
   }
 }
 
+// ---- Shared types ----
+
+/** Activity metadata shared across commands, responses, and events. */
+export interface ActivityInfo {
+  activity: string;
+  agent: string;
+  title?: string;
+}
+
 // ---- Payload types ----
 
 /** Request payload. Accepted by Transport's `send` method. */
@@ -99,8 +108,12 @@ export type XacppResponse =
   | { kind: "question"; requestId: string } & QuestionResponse
   /** Sensitive info operation response (flatten: response fields spread to top level). */
   | { kind: "sensitive_info_operation"; requestId: string } & SensitiveInfoOperationResponse
-  /** Activity created. */
-  | { kind: "activity_created"; activity: string; agent: string; title?: string }
+  /** Activity ready for interaction. */
+  | ({ kind: "activity_ready" } & ActivityInfo)
+  /** Activity not found. */
+  | { kind: "activity_not_found" }
+  /** Available activities list. */
+  | { kind: "available_activities"; total: number; activities: ActivityInfo[] }
   /** Generic acknowledge: request processed successfully, no data returned. */
   | { kind: "acknowledge" }
   /** Processing failure. */
