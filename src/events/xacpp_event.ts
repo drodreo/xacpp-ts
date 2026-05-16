@@ -5,6 +5,7 @@
  * The only terminal signal is `complete`; all other events carry no implicit termination semantics.
  */
 
+import type { ActivityInfo } from "../message";
 import type { ContentPart } from "./content";
 import type { ActionRequestEvent, NotifyEvent, QuestionEvent, SensitiveInfoOperationEvent } from "./interaction";
 import type { ActivityStartEvent, ContentDeltaEvent, ContentPartEvent, SecurityAlertEvent, ToolResultEvent, ToolUseEvent, TraceableEvent } from "./payload";
@@ -85,6 +86,11 @@ export interface ActivityStartXacppEvent extends ActivityStartEvent {
   type: "activity_start";
 }
 
+/** Activity metadata updated. */
+export interface ActivityUpdatesXacppEvent extends ActivityInfo {
+  type: "activity_updates";
+}
+
 /** SubActivity completed. */
 export interface ActivityDoneXacppEvent {
   type: "activity_done";
@@ -151,6 +157,7 @@ export type XacppEvent =
   | SensitiveInfoOperationXacppEvent
   | WaitingCommandXacppEvent
   | ActivityStartXacppEvent
+  | ActivityUpdatesXacppEvent
   | ActivityDoneXacppEvent
   | ActivityAbortedXacppEvent
   | ToolUseXacppEvent

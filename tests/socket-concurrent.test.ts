@@ -74,7 +74,8 @@ function commandTag(payload: XacppRequest): string {
   if (payload.kind !== "command") return "other";
   const cmd: XacppCommand = payload.payload;
   if (typeof cmd === "string") {
-    // "invoke_activity" → "invoke", "compact_activity" → "compact", etc.
+    // "last_activity" → "last", etc.
+    if (cmd === "last_activity") return "last";
     return cmd.replace(/_activity$/, "");
   }
   if (typeof cmd === "object") {
@@ -83,6 +84,8 @@ function commandTag(payload: XacppRequest): string {
     if ("invoke_activity" in cmd) return "invoke";
     if ("compact_activity" in cmd) return "compact";
     if ("cancel_activity" in cmd) return "cancel";
+    if ("list_activity" in cmd) return "list";
+    if ("switch_activity" in cmd) return "switch";
   }
   return "other";
 }
@@ -107,6 +110,9 @@ describe("SocketTransport concurrent", () => {
       { compact_activity: { activity: "act-1" } },
       { cancel_activity: { activity: "act-1" } },
       { establish: { credentials: null } },
+      "last_activity",
+      { list_activity: { pageNum: 1, pageSize: 10 } },
+      { switch_activity: { activity: "act-1" } },
     ];
 
     // Send 5 concurrent requests, measure time
@@ -126,11 +132,11 @@ describe("SocketTransport concurrent", () => {
       })
       .sort();
 
-    // All 5 responses received, no cross-talk
-    expect(sids).toEqual(["cancel", "compact", "establish", "invoke", "new"]);
+    // All 8 responses received, no cross-talk
+    expect(sids).toEqual(["cancel", "compact", "establish", "invoke", "last", "list", "new", "switch"]);
 
-    // Concurrent elapsed < 30ms (serial would need 5×10ms=50ms)
-    expect(elapsed).toBeLessThan(30);
+    // Concurrent elapsed < 50ms (serial would need 8×10ms=80ms)
+    expect(elapsed).toBeLessThan(50);
 
     cleanup();
   });

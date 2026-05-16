@@ -13,6 +13,7 @@
 import { describe, it, expect } from "vitest";
 import type { XacppEvent } from "../src/events/xacpp_event";
 import type { XacppEnvelope, XacppRequest, XacppResponse } from "../src/message";
+import type { ActivityInfo } from "../src/message";
 
 // ---- XacppEvent round-trip ----
 
@@ -386,5 +387,141 @@ describe("ActionRequest without responder", () => {
 
     const de: XacppEvent = JSON.parse(json);
     expect(de.type).toBe("action_request");
+  });
+});
+
+// ---- New Command / Response / Event round-trip tests ----
+
+describe("New types serialization", () => {
+  it("command last_activity roundtrip", () => {
+    const cmd: XacppCommand = "last_activity";
+    const json = JSON.stringify(cmd);
+    expect(json).toBe('"last_activity"');
+
+    const de: XacppCommand = JSON.parse(json);
+    expect(de).toBe("last_activity");
+  });
+
+  it("command list_activity with query roundtrip", () => {
+    const cmd: XacppCommand = { list_activity: { query: "test", pageNum: 1, pageSize: 10 } };
+    const json = JSON.stringify(cmd);
+    expect(json).toContain('"list_activity"');
+    expect(json).toContain('"query":"test"');
+    expect(json).toContain('"pageNum":1');
+    expect(json).toContain('"pageSize":10');
+
+    const de: XacppCommand = JSON.parse(json);
+    expect(de).toEqual(cmd);
+  });
+
+  it("command list_activity without query roundtrip", () => {
+    const cmd: XacppCommand = { list_activity: { pageNum: 1, pageSize: 10 } };
+    const json = JSON.stringify(cmd);
+    expect(json).toContain('"list_activity"');
+    expect(json).not.toContain("query");
+    expect(json).toContain('"pageNum":1');
+    expect(json).toContain('"pageSize":10');
+
+    const de: XacppCommand = JSON.parse(json);
+    expect(de).toEqual(cmd);
+  });
+
+  it("command switch_activity roundtrip", () => {
+    const cmd: XacppCommand = { switch_activity: { activity: "act-1" } };
+    const json = JSON.stringify(cmd);
+    expect(json).toContain('"switch_activity"');
+    expect(json).toContain('"activity":"act-1"');
+
+    const de: XacppCommand = JSON.parse(json);
+    expect(de).toEqual(cmd);
+  });
+
+  it("response activity_ready roundtrip", () => {
+    const wire: XacppEnvelope = {
+      type: "response",
+      id: "r1",
+      payload: {
+        kind: "activity_ready",
+        activity: "act-1",
+        agent: "x-agent",
+        title: "test title",
+      },
+    };
+    const json = JSON.stringify(wire);
+    expect(json).toContain('"kind":"activity_ready"');
+    expect(json).toContain('"activity":"act-1"');
+    expect(json).toContain('"agent":"x-agent"');
+    expect(json).toContain('"title":"test title"');
+
+    const de: XacppEnvelope = JSON.parse(json);
+    expect(de.type).toBe("response");
+    if (de.type === "response" && de.payload.kind === "activity_ready") {
+      expect(de.payload.activity).toBe("act-1");
+      expect(de.payload.agent).toBe("x-agent");
+      expect(de.payload.title).toBe("test title");
+    }
+  });
+
+  it("response activity_not_found roundtrip", () => {
+    const wire: XacppEnvelope = {
+      type: "response",
+      id: "r1",
+      payload: { kind: "activity_not_found" },
+    };
+    const json = JSON.stringify(wire);
+    expect(json).toContain('"kind":"activity_not_found"');
+
+    const de: XacppEnvelope = JSON.parse(json);
+    expect(de.type).toBe("response");
+    if (de.type === "response") {
+      expect(de.payload.kind).toBe("activity_not_found");
+    }
+  });
+
+  it("response available_activities roundtrip", () => {
+    const wire: XacppEnvelope = {
+      type: "response",
+      id: "r1",
+      payload: {
+        kind: "available_activities",
+        total: 2,
+        activities: [
+          { activity: "act-1", agent: "x-agent", title: "title 1" },
+          { activity: "act-2", agent: "x-agent" },
+        ],
+      },
+    };
+    const json = JSON.stringify(wire);
+    expect(json).toContain('"kind":"available_activities"');
+    expect(json).toContain('"total":2');
+    expect(json).toContain('"activities"');
+
+    const de: XacppEnvelope = JSON.parse(json);
+    expect(de.type).toBe("response");
+    if (de.type === "response" && de.payload.kind === "available_activities") {
+      expect(de.payload.total).toBe(2);
+      expect(de.payload.activities).toHaveLength(2);
+      expect(de.payload.activities[0].activity).toBe("act-1");
+      expect(de.payload.activities[1].activity).toBe("act-2");
+    }
+  });
+
+  it("event activity_updates roundtrip", () => {
+    const event: XacppEvent = {
+      type: "activity_updates",
+      activity: "act-1",
+      agent: "x-agent",
+      title: "updated title",
+    };
+    const json = JSON.stringify(event);
+    expect(json).toContain('"type":"activity_updates"');
+    expect(json).toContain('"activity":"act-1"');
+
+    const de: XacppEvent = JSON.parse(json);
+    expect(de.type).toBe("activity_updates");
+    if (de.type === "activity_updates") {
+      expect(de.activity).toBe("act-1");
+      expect(de.agent).toBe("x-agent");
+    }
   });
 });

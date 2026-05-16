@@ -14,8 +14,14 @@ export type XacppCommand =
   | { establish: { credentials?: string } }
   /** Confirm establishment after challenge verification (phase 3 of 3-way handshake). */
   | "establish_confirm"
+  /** Resume the last active Activity. */
+  | "last_activity"
   /** Create a new Activity session. */
   | { new_activity: { title?: string } }
+  /** List available Activities with pagination. */
+  | { list_activity: { query?: string; pageNum: number; pageSize: number } }
+  /** Switch to an existing Activity. */
+  | { switch_activity: { activity: string } }
   /** Invoke an existing Activity to perform an operation. */
   | { invoke_activity: { activity: string; messages: ContentPart[] } }
   /** Compact Activity (reclaim resources / generate snapshot summary). */
