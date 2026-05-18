@@ -42,5 +42,12 @@ export interface VideoPart {
   partId?: string;
 }
 
+/** File content part. */
+export interface FilePart {
+  type: "file";
+  source: FileRef;
+  partId?: string;
+}
+
 /** 统一多模态内容分片。 */
-export type ContentPart = TextPart | ImagePart | AudioPart | VideoPart;
+export type ContentPart = TextPart | ImagePart | AudioPart | VideoPart | FilePart;
