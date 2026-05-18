@@ -11,6 +11,7 @@
  */
 
 import { describe, it, expect } from "vitest";
+import type { FileRef } from "../src/events/content";
 import type { XacppEvent } from "../src/events/xacpp_event";
 import type { XacppEnvelope, XacppRequest, XacppResponse } from "../src/message";
 import type { ActivityInfo } from "../src/message";
@@ -523,5 +524,68 @@ describe("New types serialization", () => {
       expect(de.activity).toBe("act-1");
       expect(de.agent).toBe("x-agent");
     }
+  });
+});
+
+// ---- FileRef round-trip tests ----
+
+describe("FileRef serialization", () => {
+  it("fileref full roundtrip", () => {
+    const fileRef: FileRef = {
+      remoteUrl: "https://example.com/file.png",
+      localUri: "/tmp/file.png",
+      remoteExpiresAt: "2026-05-18T12:00:00Z",
+      mimeType: "image/png",
+      requireOrganized: true,
+      sizeBytes: 1024,
+      sha256: "abc123",
+    };
+
+    const json = JSON.stringify(fileRef);
+    expect(json).toContain('"remoteUrl":"https://example.com/file.png"');
+    expect(json).toContain('"localUri":"/tmp/file.png"');
+    expect(json).toContain('"remoteExpiresAt":"2026-05-18T12:00:00Z"');
+    expect(json).toContain('"mimeType":"image/png"');
+    expect(json).toContain('"requireOrganized":true');
+    expect(json).toContain('"sizeBytes":1024');
+    expect(json).toContain('"sha256":"abc123"');
+
+    const de: FileRef = JSON.parse(json);
+    expect(de).toEqual(fileRef);
+  });
+
+  it("fileref defaults roundtrip", () => {
+    const fileRef: FileRef = {
+      remoteUrl: "https://example.com/file.png",
+      localUri: "/tmp/file.png",
+      mimeType: "image/png",
+      sizeBytes: 1024,
+    };
+
+    const json = JSON.stringify(fileRef);
+    expect(json).not.toContain("remoteExpiresAt");
+    expect(json).not.toContain("requireOrganized");
+    expect(json).not.toContain("sha256");
+
+    const de: FileRef = JSON.parse(json);
+    expect(de.remoteUrl).toBe("https://example.com/file.png");
+    expect(de.localUri).toBe("/tmp/file.png");
+    expect(de.remoteExpiresAt).toBeUndefined();
+    expect(de.mimeType).toBe("image/png");
+    expect(de.requireOrganized).toBeUndefined();
+    expect(de.sizeBytes).toBe(1024);
+    expect(de.sha256).toBeUndefined();
+  });
+
+  it("fileref deserialize legacy format", () => {
+    const json = '{"remoteUrl":"https://example.com/old.png","localUri":"/tmp/old.png","mimeType":"image/png","sizeBytes":512}';
+    const de: FileRef = JSON.parse(json);
+    expect(de.remoteUrl).toBe("https://example.com/old.png");
+    expect(de.localUri).toBe("/tmp/old.png");
+    expect(de.remoteExpiresAt).toBeUndefined();
+    expect(de.mimeType).toBe("image/png");
+    expect(de.requireOrganized).toBeUndefined();
+    expect(de.sizeBytes).toBe(512);
+    expect(de.sha256).toBeUndefined();
   });
 });

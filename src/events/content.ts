@@ -4,8 +4,14 @@
 export interface FileRef {
   remoteUrl: string;
   localUri: string;
+  /** Remote URL expiration time (UTC ISO 8601). */
+  remoteExpiresAt?: string;
   mimeType: string;
+  /** Whether the file needs to be organized from a temp directory to a permanent location. */
+  requireOrganized?: boolean;
   sizeBytes: number;
+  /** SHA-256 hash of the file content. */
+  sha256?: string;
 }
 
 export interface TextPart {
