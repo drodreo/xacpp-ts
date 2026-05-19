@@ -113,7 +113,7 @@ export class StdioTransport implements XacppTransport {
     try {
       envelope = JSON.parse(line);
     } catch {
-      console.warn("[xacpp:stdio] failed to parse frame: %s", line);
+      console.debug("[xacpp::stdio::log] %s", line);
       return;
     }
 
