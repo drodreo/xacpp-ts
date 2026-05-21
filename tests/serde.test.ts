@@ -28,6 +28,7 @@ describe("XacppEvent serialization", () => {
       actionId: "act-1",
       description: "list files",
       alert: "warn",
+      intent: "list files",
     };
 
     const json = JSON.stringify(event);
@@ -169,6 +170,7 @@ describe("XacppEnvelope serialization", () => {
           actionId: "act-1",
           description: "test",
           alert: "info",
+          intent: "test",
         },
       },
     };
@@ -379,6 +381,7 @@ describe("ActionRequest without responder", () => {
       actionId: "act-r",
       description: "test",
       alert: "info",
+      intent: "test",
     };
 
     const json = JSON.stringify(event);

@@ -31,6 +31,7 @@ export interface ToolUseEvent {
   toolName: string;
   index: number;
   arguments: string;
+  intent: string;
 }
 
 /** 工具调用结束事件载荷。 */

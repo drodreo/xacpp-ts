@@ -23,6 +23,7 @@ export interface ActionRequestEvent {
   actionId: string;
   description: string;
   alert: AlertLevel;
+  intent: string;
 }
 
 // ---- 通知 ----
