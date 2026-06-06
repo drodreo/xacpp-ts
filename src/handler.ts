@@ -9,6 +9,7 @@
 
 import type { XacppTransport } from "./transport";
 import type { XacppCommand } from "./commands";
+import type { Capabilities } from "./capability";
 import type { XacppActivityEvent } from "./events";
 import type { XacppResponse } from "./message";
 
@@ -72,4 +73,21 @@ export interface EstablishHandler {
   onEstablishConfirm(
     transport: XacppTransport,
   ): Promise<{ sessionId: string; handler: XacppSessionHandler; credentials: string }>;
+}
+
+// ---- Negotiate Handler ----
+
+/** Peer Negotiate request handler.
+ *
+ * Called when receiving Negotiate command from the peer during the capability negotiation phase.
+ * The handler inspects the remote peer's capabilities and decides whether to accept or reject.
+ */
+export interface NegotiateHandler {
+  /**
+   * Handle Negotiate request.
+   *
+   * Inspects the remote peer's capabilities.
+   * Throw XacppError to reject negotiation.
+   */
+  onNegotiate(remoteCapabilities: Capabilities): Promise<void>;
 }

@@ -7,9 +7,12 @@
  */
 
 import type { ContentPart } from "../events/content";
+import type { Capabilities } from "../capability";
 
 /** XACPP protocol command. */
 export type XacppCommand =
+  /** Negotiate capabilities before session establishment. */
+  | { negotiate: { capabilities: Capabilities } }
   /** Establish logical session. */
   | { establish: { credentials?: string } }
   /** Confirm establishment after challenge verification (phase 3 of 3-way handshake). */
