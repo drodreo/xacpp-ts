@@ -17,6 +17,7 @@
  */
 
 import type { XacppCommand } from "./commands";
+import type { Capabilities } from "./capability";
 import type {
   ActionResponse,
   QuestionResponse,
@@ -76,6 +77,11 @@ export class XacppError extends Error {
   static establishReject(reason: string): XacppError {
     return new XacppError("establish_rejected", `establish rejected: ${reason}`);
   }
+
+  /** Protocol state error. */
+  static invalidState(message: string): XacppError {
+    return new XacppError("invalid_state", `invalid state: ${message}`);
+  }
 }
 
 // ---- Shared types ----
@@ -96,6 +102,8 @@ export type XacppRequest =
 
 /** Response payload. Returned by Transport's `send` method. */
 export type XacppResponse =
+  /** Capability negotiation response. */
+  | { kind: "negotiated"; capabilities: Capabilities }
   /** Handshake success: issues session identifier and credentials. */
   | { kind: "established"; sessionId: string; credentials: string }
   /** Challenge issued during first-time establishment. */

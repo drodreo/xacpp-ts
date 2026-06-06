@@ -39,7 +39,8 @@ import type { XacppCommand } from "./commands";
 import type { XacppActivityEvent } from "./events";
 import type { XacppRequest, XacppResponse } from "./message";
 import { XacppError } from "./message";
-import type { EstablishDecision, EstablishHandler, XacppSessionHandler } from "./handler";
+import type { Capabilities } from "./capability";
+import type { EstablishDecision, EstablishHandler, NegotiateHandler, XacppSessionHandler } from "./handler";
 import { XacppSession } from "./session";
 
 /** Peer protocol state. */
@@ -48,6 +49,8 @@ export enum PeerState {
   Disconnected = "disconnected",
   /** Communication channel established, ready to create logical sessions. */
   Connected = "connected",
+  /** Capabilities negotiated, ready for session establishment. */
+  Negotiated = "negotiated",
 }
 
 /** XACPP protocol endpoint.
@@ -59,15 +62,25 @@ export class XacppPeer {
   private _state: PeerState = PeerState.Disconnected;
   private sessions: Map<string, XacppSessionHandler> = new Map();
   private establishHandler: EstablishHandler;
+  private capabilities: Capabilities;
+  private negotiateHandler: NegotiateHandler;
+  private _remoteCapabilities: Capabilities = { commands: [], events: [] };
 
-  constructor(transport: XacppTransport, establishHandler: EstablishHandler) {
+  constructor(capabilities: Capabilities, transport: XacppTransport, negotiateHandler: NegotiateHandler, establishHandler: EstablishHandler) {
     this.transport = transport;
+    this.capabilities = capabilities;
     this.establishHandler = establishHandler;
+    this.negotiateHandler = negotiateHandler;
   }
 
   /** Current protocol state. */
   get state(): PeerState {
     return this._state;
+  }
+
+  /** Remote peer's capabilities (available after successful negotiation). */
+  get remoteCapabilities(): Capabilities {
+    return this._remoteCapabilities;
   }
 
   // ---- Connection management ----
@@ -79,13 +92,21 @@ export class XacppPeer {
    */
   async connect(): Promise<void> {
     const sessions = this.sessions;
+    const capabilities = this.capabilities;
     const establishHandler = this.establishHandler;
+    const negotiateHandler = this.negotiateHandler;
     const transport = this.transport;
 
     transport.onRequest((sessionId, payload) => {
       return Promise.resolve().then(async () => {
         if (sessionId === null) {
           // Pre-session request
+          if (payload.kind === "command" && typeof payload.payload === "object" && "negotiate" in payload.payload) {
+            // Negotiate request
+            const remoteCaps = payload.payload.negotiate.capabilities;
+            await negotiateHandler.onNegotiate(remoteCaps);
+            return { kind: "negotiated" as const, capabilities: capabilities };
+          }
           if (payload.kind === "command" && typeof payload.payload === "object" && "establish" in payload.payload) {
             // Establish request
             const credentials = payload.payload.establish.credentials;
@@ -126,6 +147,34 @@ export class XacppPeer {
     }
   }
 
+  /** Negotiate capabilities with the peer.
+   *
+   * Sends this peer's capabilities to the remote side and receives the remote side's capabilities.
+   * On success, state transitions to `Negotiated`; subsequent `establish` calls can create logical sessions.
+   */
+  async negotiate(): Promise<void> {
+    if (this._state !== PeerState.Connected) {
+      throw XacppError.invalidState("negotiate requires Connected state");
+    }
+    const response = await this.transport.send(null, {
+      kind: "command",
+      payload: { negotiate: { capabilities: this.capabilities } },
+    });
+
+    if (response.kind === "negotiated") {
+      this._remoteCapabilities = response.capabilities;
+      await this.negotiateHandler.onNegotiate(this._remoteCapabilities);
+      this._state = PeerState.Negotiated;
+      return;
+    }
+
+    if (response.kind === "error") {
+      throw XacppError.application(response.code, response.message);
+    }
+
+    throw XacppError.internal(`unexpected response to negotiate: ${JSON.stringify(response)}`);
+  }
+
   /** Establish logical session.
    *
    * Sends Establish command to peer, carrying optional auth credentials and session handler.
@@ -136,6 +185,9 @@ export class XacppPeer {
     handler: XacppSessionHandler,
     verifyChallenge: (challenge: string) => void,
   ): Promise<XacppSession> {
+    if (this._state !== PeerState.Negotiated) {
+      throw XacppError.invalidState("establish requires Negotiated state");
+    }
     const response = await this.transport.send(null, {
       kind: "command",
       payload: { establish: { credentials } },
@@ -193,6 +245,7 @@ export class XacppPeer {
     await this.transport.disconnect();
     this._state = PeerState.Disconnected;
     this.sessions.clear();
+    this._remoteCapabilities = { commands: [], events: [] };
   }
 
   // ---- Active sends (no session context) ----
