@@ -6,33 +6,44 @@
  * 2. Routing: session_id correctly routes to the corresponding Session handler
  * 3. Establish: initiator and responder handshake flow
  * 4. Disconnect detection
+ * 5. Interaction command lifecycle (action_request, question, sensitive_info_operation)
  */
 
 import { describe, it, expect } from "vitest";
 import type { XacppRequest, XacppResponse } from "../src/message";
-import { XacppError } from "../src/message";
+import { XacppError, acknowledge, genericResponse } from "../src/message";
 import type { XacppTransport, RequestHandler } from "../src/transport";
 import type { XacppCommand } from "../src/commands";
+import { genericCommand } from "../src/commands";
 import type { XacppActivityEvent } from "../src/events";
+import { newEvent, newActivityEvent } from "../src/events";
 import type { XacppSessionHandler, EstablishHandler, EstablishDecision, NegotiateHandler } from "../src/handler";
 import type { Capabilities } from "../src/capability";
 import { XacppPeer, PeerState } from "../src/peer";
+import type {
+  ActionRequestPayload,
+  ActionResponse,
+  QuestionPayload,
+  QuestionResponse,
+  SensitiveInfoOperationPayload,
+  SensitiveInfoResult,
+} from "../src/events/interaction";
 
 // ---- Test Handler implementations ----
 
 /** Generic Session handler: returns Acknowledge for both Command and Event. */
 class TestSessionHandler implements XacppSessionHandler {
   async onCommand(): Promise<XacppResponse> {
-    return { kind: "acknowledge" };
+    return acknowledge();
   }
   async onEvent(_event: XacppActivityEvent): Promise<XacppResponse> {
-    return { kind: "acknowledge" };
+    return acknowledge();
   }
 }
 
 /** Auto-approves Establish and returns TestSessionHandler. */
 class AutoApproveEstablishHandler implements EstablishHandler {
-  async onEstablish(_transport: XacppTransport, _credentials: string | null): Promise<EstablishDecision> {
+  async onEstablish(_transport: XacppTransport, _credentials: string | undefined): Promise<EstablishDecision> {
     return { type: "established", sessionId: "auto-sid", credentials: "auto-creds", handler: new TestSessionHandler() };
   }
   async onEstablishConfirm(_transport: XacppTransport): Promise<{ sessionId: string; handler: XacppSessionHandler; credentials: string }> {
@@ -40,21 +51,21 @@ class AutoApproveEstablishHandler implements EstablishHandler {
   }
 }
 
-/** Identified Session handler: identifies itself via sessionId in responses. */
+/** Identified Session handler: identifies itself via generic response. */
 class IdentifiedHandler implements XacppSessionHandler {
   constructor(private id: string, private creds: string) {}
   async onCommand(): Promise<XacppResponse> {
-    return { kind: "established", sessionId: this.id, credentials: this.creds };
+    return genericResponse("identified", { sessionId: this.id, credentials: this.creds });
   }
   async onEvent(_event: XacppActivityEvent): Promise<XacppResponse> {
-    return { kind: "established", sessionId: this.id, credentials: this.creds };
+    return genericResponse("identified", { sessionId: this.id, credentials: this.creds });
   }
 }
 
 /** EstablishHandler that assigns IdentifiedHandlers in sequence. */
 class SequencedEstablishHandler implements EstablishHandler {
   private counter = 0;
-  async onEstablish(_transport: XacppTransport, _credentials: string | null): Promise<EstablishDecision> {
+  async onEstablish(_transport: XacppTransport, _credentials: string | undefined): Promise<EstablishDecision> {
     const n = ++this.counter;
     const sid = `handler-${n}`;
     return { type: "established", sessionId: sid, credentials: `creds-${n}`, handler: new IdentifiedHandler(sid, `creds-${n}`) };
@@ -70,7 +81,7 @@ class SequencedEstablishHandler implements EstablishHandler {
 class ChallengeEstablishHandler implements EstablishHandler {
   async onEstablish(
     _transport: XacppTransport,
-    _credentials: string | null,
+    _credentials: string | undefined,
   ): Promise<EstablishDecision> {
     return { type: "challenge_required", challenge: "test-challenge" };
   }
@@ -86,6 +97,58 @@ class ChallengeEstablishHandler implements EstablishHandler {
 class AcceptAllNegotiateHandler implements NegotiateHandler {
   async onNegotiate(_remoteCapabilities: Capabilities): Promise<void> {
     // Accept all
+  }
+}
+
+/** Handler that processes interaction commands (action_request, question, sensitive_info_operation). */
+class InteractionSessionHandler implements XacppSessionHandler {
+  async onCommand(command: XacppCommand): Promise<XacppResponse> {
+    if (typeof command === "object" && "generic" in command) {
+      const { name, arguments: args } = command.generic;
+
+      if (name === "action_request") {
+        const payload = args as ActionRequestPayload;
+        return genericResponse("action", { requestId: payload.requestId, type: "approve" } satisfies ActionResponse);
+      }
+
+      if (name === "question") {
+        return genericResponse("question", { type: "answer", content: "yes" } satisfies QuestionResponse);
+      }
+
+      if (name === "sensitive_info_operation") {
+        const payload = args as SensitiveInfoOperationPayload;
+        if (payload.operation.type === "collect") {
+          const results: SensitiveInfoResult[] = payload.operation.items.map((item) => ({
+            type: "provided",
+            key: item.key,
+            value: `value-for-${item.key}`,
+          }));
+          return genericResponse("sensitive_info_operation", { results });
+        }
+        if (payload.operation.type === "delete") {
+          const results: SensitiveInfoResult[] = payload.operation.items.map((item) => ({
+            type: "deleted",
+            id: item.key,
+          }));
+          return genericResponse("sensitive_info_operation", { results });
+        }
+      }
+    }
+    return acknowledge();
+  }
+
+  async onEvent(_event: XacppActivityEvent): Promise<XacppResponse> {
+    return acknowledge();
+  }
+}
+
+/** EstablishHandler that creates InteractionSessionHandler. */
+class InteractionEstablishHandler implements EstablishHandler {
+  async onEstablish(_transport: XacppTransport, _credentials: string | undefined): Promise<EstablishDecision> {
+    return { type: "established", sessionId: "int-sid", credentials: "int-creds", handler: new InteractionSessionHandler() };
+  }
+  async onEstablishConfirm(_transport: XacppTransport): Promise<{ sessionId: string; handler: XacppSessionHandler; credentials: string }> {
+    return { sessionId: "int-sid", handler: new InteractionSessionHandler(), credentials: "int-creds" };
   }
 }
 
@@ -237,39 +300,8 @@ function duplexPair(): [DirectTransport, DirectTransport] {
 async function connectedPeers(): Promise<[XacppPeer, XacppPeer]> {
   const [a, b] = duplexPair();
   const capsAgent: Capabilities = {
-    commands: [
-      { name: "new_activity" },
-      { name: "last_activity" },
-      { name: "list_activity" },
-      { name: "switch_activity" },
-      { name: "invoke_activity" },
-      { name: "compact_activity" },
-      { name: "cancel_activity" },
-      { name: "message" },
-    ],
-    events: [
-      { name: "content_delta" },
-      { name: "content_part" },
-      { name: "think" },
-      { name: "info" },
-      { name: "warn" },
-      { name: "error" },
-      { name: "action_request" },
-      { name: "notify" },
-      { name: "question" },
-      { name: "sensitive_info_operation" },
-      { name: "waiting_command" },
-      { name: "activity_start" },
-      { name: "activity_updates" },
-      { name: "activity_done" },
-      { name: "activity_aborted" },
-      { name: "tool_use" },
-      { name: "tool_result" },
-      { name: "security_alert" },
-      { name: "upload" },
-      { name: "pair_complete" },
-      { name: "complete" },
-    ],
+    commands: [{ name: "new_activity" }, { name: "list_activity" }],
+    events: [{ name: "think" }, { name: "info" }],
   };
   const capsBot: Capabilities = { commands: [], events: [] };
   const peerA = new XacppPeer(capsAgent, a, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler());
@@ -282,6 +314,18 @@ async function connectedPeers(): Promise<[XacppPeer, XacppPeer]> {
 /** Creates a pair of connected + negotiated Peers ready for Establish. */
 async function negotiatedPeers(): Promise<[XacppPeer, XacppPeer]> {
   const [peerA, peerB] = await connectedPeers();
+  await peerA.negotiate();
+  return [peerA, peerB];
+}
+
+/** Creates a pair of negotiated Peers where side B uses InteractionSessionHandler. */
+async function interactionPeers(): Promise<[XacppPeer, XacppPeer]> {
+  const [a, b] = duplexPair();
+  const caps: Capabilities = { commands: [], events: [] };
+  const peerA = new XacppPeer(caps, a, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler());
+  const peerB = new XacppPeer(caps, b, new AcceptAllNegotiateHandler(), new InteractionEstablishHandler());
+  await peerA.connect();
+  await peerB.connect();
   await peerA.negotiate();
   return [peerA, peerB];
 }
@@ -317,7 +361,7 @@ describe("Transport send", () => {
       ) {
         return Promise.resolve({ kind: "established" as const, sessionId: "sid-1", credentials: "test-creds" });
       }
-      return Promise.resolve({ kind: "acknowledge" });
+      return Promise.resolve(acknowledge());
     });
 
     await transportA.connect();
@@ -326,7 +370,7 @@ describe("Transport send", () => {
     const response = await timeout(
       transportA.send(null, {
         kind: "command",
-        payload: { establish: { credentials: null } },
+        payload: { establish: { credentials: undefined } },
       }),
     );
 
@@ -344,7 +388,7 @@ describe("Transport send", () => {
       if (payload.kind === "event") {
         received.push(payload.payload);
       }
-      return Promise.resolve({ kind: "acknowledge" });
+      return Promise.resolve(acknowledge());
     });
 
     await transportA.connect();
@@ -353,31 +397,34 @@ describe("Transport send", () => {
     const response = await timeout(
       transportA.send("s1", {
         kind: "event",
-        payload: { activity: "test-act", event: { type: "think", content: "hello" } },
+        payload: newActivityEvent("test-act", newEvent("think", { content: "hello" })),
       }),
     );
 
-    expect(response.kind).toBe("acknowledge");
+    expect(response.kind).toBe("generic");
+    if (response.kind === "generic") {
+      expect(response.name).toBe("acknowledge");
+    }
 
     expect(received[0].activity).toBe("test-act");
-    expect(received[0].event.type).toBe("think");
-    if (received[0].event.type === "think") {
-      expect(received[0].event.content).toBe("hello");
-    }
+    expect(received[0].event.name).toBe("think");
+    expect((received[0].event.data as { content: string }).content).toBe("hello");
   });
 
-  it("send interactive event returns action response", async () => {
+  it("send interaction command returns action response", async () => {
     const [transportA, transportB] = duplexPair();
 
     transportB.onRequest((_sessionId, payload) => {
-      if (payload.kind === "event" && payload.payload.event.type === "action_request") {
-        return Promise.resolve({
-          kind: "action" as const,
-          requestId: payload.payload.event.requestId,
-          type: "approve" as const,
-        });
+      if (payload.kind === "command") {
+        const cmd = payload.payload;
+        if (typeof cmd === "object" && "generic" in cmd && cmd.generic.name === "action_request") {
+          const args = cmd.generic.arguments as ActionRequestPayload;
+          return Promise.resolve(
+            genericResponse("action", { requestId: args.requestId, type: "approve" }),
+          );
+        }
       }
-      return Promise.resolve({ kind: "acknowledge" });
+      return Promise.resolve(acknowledge());
     });
 
     await transportA.connect();
@@ -385,26 +432,25 @@ describe("Transport send", () => {
 
     const response = await timeout(
       transportA.send("s1", {
-        kind: "event",
-        payload: {
-          activity: "test-act",
-          event: {
-            type: "action_request",
-            requestId: "req-1",
-            toolName: "bash",
-            arguments: "{}",
-            actionId: "act-1",
-            description: "test",
-            alert: "info",
-          },
-        },
+        kind: "command",
+        payload: genericCommand("action_request", {
+          activity: "act-1",
+          requestId: "req-1",
+          toolName: "bash",
+          arguments: "{}",
+          actionId: "act-1",
+          description: "test",
+          alert: "info",
+          intent: "test",
+        } satisfies ActionRequestPayload),
       }),
     );
 
-    expect(response.kind).toBe("action");
-    if (response.kind === "action") {
-      expect(response.requestId).toBe("req-1");
-      expect(response.type).toBe("approve");
+    expect(response.kind).toBe("generic");
+    if (response.kind === "generic") {
+      expect(response.name).toBe("action");
+      const data = response.data as ActionResponse;
+      expect(data.type).toBe("approve");
     }
   });
 
@@ -421,7 +467,7 @@ describe("Transport send", () => {
     const response = await timeout(
       transportA.send(null, {
         kind: "command",
-        payload: { establish: { credentials: null } },
+        payload: { establish: { credentials: undefined } },
       }),
     );
 
@@ -441,7 +487,7 @@ describe("Transport send", () => {
     const response = await timeout(
       transportA.send(null, {
         kind: "command",
-        payload: { establish: { credentials: null } },
+        payload: { establish: { credentials: undefined } },
       }),
     );
 
@@ -455,10 +501,10 @@ describe("Transport send", () => {
     const [transportA, transportB] = duplexPair();
 
     transportA.onRequest(() =>
-      Promise.resolve({ kind: "established" as const, sessionId: "from-a", credentials: "creds-a" }),
+      Promise.resolve(genericResponse("from-a", null)),
     );
     transportB.onRequest(() =>
-      Promise.resolve({ kind: "established" as const, sessionId: "from-b", credentials: "creds-b" }),
+      Promise.resolve(genericResponse("from-b", null)),
     );
 
     await transportA.connect();
@@ -468,21 +514,21 @@ describe("Transport send", () => {
     const respAB = await timeout(
       transportA.send(null, {
         kind: "command",
-        payload: { establish: { credentials: null } },
+        payload: { establish: { credentials: undefined } },
       }),
     );
-    expect(respAB.kind).toBe("established");
-    if (respAB.kind === "established") expect(respAB.sessionId).toBe("from-b");
+    expect(respAB.kind).toBe("generic");
+    if (respAB.kind === "generic") expect(respAB.name).toBe("from-b");
 
     // B → A
     const respBA = await timeout(
       transportB.send(null, {
         kind: "command",
-        payload: { establish: { credentials: null } },
+        payload: { establish: { credentials: undefined } },
       }),
     );
-    expect(respBA.kind).toBe("established");
-    if (respBA.kind === "established") expect(respBA.sessionId).toBe("from-a");
+    expect(respBA.kind).toBe("generic");
+    if (respBA.kind === "generic") expect(respBA.name).toBe("from-a");
   });
 });
 
@@ -504,7 +550,7 @@ describe("Peer", () => {
     const [peerA] = await negotiatedPeers();
 
     const handler = new TestSessionHandler();
-    const session = await timeout(peerA.establish(null, handler, () => {}));
+    const session = await timeout(peerA.establish(undefined, handler, () => {}));
 
     expect(session.sessionId).toBeTruthy();
     expect(session.credentials).toBe("auto-creds");
@@ -514,22 +560,28 @@ describe("Peer", () => {
     const [peerA] = await negotiatedPeers();
 
     const handler = new TestSessionHandler();
-    const session = await timeout(peerA.establish(null, handler, () => {}));
+    const session = await timeout(peerA.establish(undefined, handler, () => {}));
 
-    const response = await timeout(session.requestCommand({ new_activity: { title: null } }));
-    expect(response.kind).toBe("acknowledge");
+    const response = await timeout(session.requestCommand(genericCommand("new_activity", { title: null })));
+    expect(response.kind).toBe("generic");
+    if (response.kind === "generic") {
+      expect(response.name).toBe("acknowledge");
+    }
   });
 
   it("session request event", async () => {
     const [peerA] = await negotiatedPeers();
 
     const handler = new TestSessionHandler();
-    const session = await timeout(peerA.establish(null, handler, () => {}));
+    const session = await timeout(peerA.establish(undefined, handler, () => {}));
 
     const response = await timeout(
-      session.requestEvent({ activity: "test-act", event: { type: "think", content: "hi" } }),
+      session.requestEvent(newActivityEvent("test-act", newEvent("think", { content: "hi" }))),
     );
-    expect(response.kind).toBe("acknowledge");
+    expect(response.kind).toBe("generic");
+    if (response.kind === "generic") {
+      expect(response.name).toBe("acknowledge");
+    }
   });
 });
 
@@ -615,7 +667,7 @@ describe("Negotiate", () => {
 
     // State is Connected, not Negotiated → establish should fail
     await expect(
-      timeout(peerA.establish(null, new TestSessionHandler(), () => {})),
+      timeout(peerA.establish(undefined, new TestSessionHandler(), () => {})),
     ).rejects.toThrow("establish requires Negotiated state");
   });
 
@@ -662,7 +714,7 @@ describe("Disconnect", () => {
   it("send after disconnect returns error", async () => {
     const [transportA, transportB] = duplexPair();
 
-    transportB.onRequest(() => Promise.resolve({ kind: "acknowledge" }));
+    transportB.onRequest(() => Promise.resolve(acknowledge()));
 
     await transportA.connect();
     await transportB.connect();
@@ -671,10 +723,10 @@ describe("Disconnect", () => {
     const response = await timeout(
       transportA.send(null, {
         kind: "command",
-        payload: { establish: { credentials: null } },
+        payload: { establish: { credentials: undefined } },
       }),
     );
-    expect(response.kind).toBe("acknowledge");
+    expect(response.kind).toBe("generic");
 
     // Disconnect B
     await transportB.disconnect();
@@ -684,7 +736,7 @@ describe("Disconnect", () => {
       timeout(
         transportA.send(null, {
           kind: "command",
-          payload: { establish: { credentials: null } },
+          payload: { establish: { credentials: undefined } },
         }),
       ),
     ).rejects.toThrow();
@@ -696,7 +748,7 @@ describe("Disconnect", () => {
 
     // Registering handler after connect should throw
     expect(() =>
-      transportA.onRequest(async () => ({ kind: "acknowledge" })),
+      transportA.onRequest(async () => acknowledge()),
     ).toThrow();
   });
 
@@ -720,53 +772,58 @@ describe("Concurrent", () => {
     const [transportA, transportB] = duplexPair();
 
     transportB.onRequest((_sessionId, payload) => {
-      // Return different sessionId based on command type, for verifying correct matching
-      let sid: string = "other";
+      // Return different name based on command name, for verifying correct matching
+      let name = "other";
       if (payload.kind === "command") {
         const cmd = payload.payload;
-        if (typeof cmd === "object" && "establish" in cmd) sid = "establish";
-        else if (typeof cmd === "object" && cmd !== null && "new_activity" in cmd) sid = "new";
-        else if (typeof cmd === "object" && cmd !== null && "invoke_activity" in cmd) sid = "invoke";
-        else if (typeof cmd === "object" && cmd !== null && "compact_activity" in cmd) sid = "compact";
-        else if (typeof cmd === "object" && cmd !== null && "cancel_activity" in cmd) sid = "cancel";
-        else if (typeof cmd === "object" && cmd !== null && "list_activity" in cmd) sid = "list";
-        else if (typeof cmd === "object" && cmd !== null && "switch_activity" in cmd) sid = "switch";
-        else if (cmd === "last_activity") sid = "last";
+        if (typeof cmd === "object" && "generic" in cmd) name = cmd.generic.name;
+        else if (typeof cmd === "object" && "establish" in cmd) name = "establish";
+        else if (typeof cmd === "object" && "negotiate" in cmd) name = "negotiate";
+        else if (cmd === "establish_confirm") name = "establish_confirm";
       } else {
-        sid = "event";
+        name = "event";
       }
-      return Promise.resolve({ kind: "established" as const, sessionId: sid, credentials: `creds-${sid}` });
+      return Promise.resolve(genericResponse(name, null));
     });
 
     await transportA.connect();
     await transportB.connect();
 
     const commands: XacppCommand[] = [
-      { establish: { credentials: null } },
-      { new_activity: { title: null } },
-      { invoke_activity: { activity: "act-1", messages: [] } },
-      { compact_activity: { activity: "act-1" } },
-      { cancel_activity: { activity: "act-1" } },
-      "last_activity",
-      { list_activity: { pageNum: 1, pageSize: 10 } },
-      { switch_activity: { activity: "act-1" } },
+      { establish: { credentials: undefined } },
+      genericCommand("new_activity", { title: null }),
+      genericCommand("invoke_activity", { activity: "act-1", messages: [] }),
+      genericCommand("compact_activity", { activity: "act-1" }),
+      genericCommand("cancel_activity", { activity: "act-1" }),
+      genericCommand("last_activity", null),
+      genericCommand("list_activity", { pageNum: 1, pageSize: 10 }),
+      genericCommand("switch_activity", { activity: "act-1" }),
     ];
 
-    // Send 5 concurrent requests
+    // Send 8 concurrent requests
     const promises = commands.map((cmd) =>
       timeout(transportA.send(null, { kind: "command", payload: cmd })),
     );
     const responses = await Promise.all(promises);
 
-    const sids = responses.map((r) => {
-      expect(r.kind).toBe("established");
-      if (r.kind === "established") return r.sessionId;
+    const names = responses.map((r) => {
+      expect(r.kind).toBe("generic");
+      if (r.kind === "generic") return r.name;
       return "";
     });
 
-    // All 8 distinct sids received, no duplicates or losses
-    const sorted = [...sids].sort();
-    expect(sorted).toEqual(["cancel", "compact", "establish", "invoke", "last", "list", "new", "switch"]);
+    // All 8 distinct names received, no duplicates or losses
+    const sorted = [...names].sort();
+    expect(sorted).toEqual([
+      "cancel_activity",
+      "compact_activity",
+      "establish",
+      "invoke_activity",
+      "last_activity",
+      "list_activity",
+      "new_activity",
+      "switch_activity",
+    ]);
   });
 });
 
@@ -786,32 +843,35 @@ describe("Multi session routing", () => {
 
     // A as initiator: establish two sessions
     const handlerA = new TestSessionHandler();
-    const session1 = await timeout(peerA.establish(null, handlerA, () => {}));
-    const session2 = await timeout(peerA.establish(null, handlerA, () => {}));
+    const session1 = await timeout(peerA.establish(undefined, handlerA, () => {}));
+    const session2 = await timeout(peerA.establish(undefined, handlerA, () => {}));
 
     const sid1 = session1.sessionId;
     const sid2 = session2.sessionId;
     expect(sid1).not.toBe(sid2);
 
-    // session_1 sends command → B-side routes to handler-1 → response sessionId = "handler-1"
-    const resp1 = await timeout(session1.requestCommand({ new_activity: { title: null } }));
-    expect(resp1.kind).toBe("established");
-    if (resp1.kind === "established") {
-      expect(resp1.sessionId).toBe("handler-1");
+    // session_1 sends command → B-side routes to handler-1 → response name = "identified", data.sessionId = "handler-1"
+    const resp1 = await timeout(session1.requestCommand(genericCommand("new_activity", { title: null })));
+    expect(resp1.kind).toBe("generic");
+    if (resp1.kind === "generic") {
+      expect(resp1.name).toBe("identified");
+      expect((resp1.data as { sessionId: string }).sessionId).toBe("handler-1");
     }
 
-    // session_2 sends command → B-side routes to handler-2 → response sessionId = "handler-2"
-    const resp2 = await timeout(session2.requestCommand({ new_activity: { title: null } }));
-    expect(resp2.kind).toBe("established");
-    if (resp2.kind === "established") {
-      expect(resp2.sessionId).toBe("handler-2");
+    // session_2 sends command → B-side routes to handler-2 → response name = "identified", data.sessionId = "handler-2"
+    const resp2 = await timeout(session2.requestCommand(genericCommand("new_activity", { title: null })));
+    expect(resp2.kind).toBe("generic");
+    if (resp2.kind === "generic") {
+      expect(resp2.name).toBe("identified");
+      expect((resp2.data as { sessionId: string }).sessionId).toBe("handler-2");
     }
 
     // Cross-validation: session_1 sends again, still routes to handler-1
-    const resp1Again = await timeout(session1.requestCommand({ cancel_activity: { activity: "act-1" } }));
-    expect(resp1Again.kind).toBe("established");
-    if (resp1Again.kind === "established") {
-      expect(resp1Again.sessionId).toBe("handler-1");
+    const resp1Again = await timeout(session1.requestCommand(genericCommand("cancel_activity", { activity: "act-1" })));
+    expect(resp1Again.kind).toBe("generic");
+    if (resp1Again.kind === "generic") {
+      expect(resp1Again.name).toBe("identified");
+      expect((resp1Again.data as { sessionId: string }).sessionId).toBe("handler-1");
     }
   });
 });
@@ -831,7 +891,7 @@ describe("Challenge handshake", () => {
 
     let challengeReceived = false;
     const session = await timeout(
-      peerA.establish(null, new TestSessionHandler(), (challenge) => {
+      peerA.establish(undefined, new TestSessionHandler(), (challenge) => {
         expect(challenge).toBe("test-challenge");
         challengeReceived = true;
       }),
@@ -850,7 +910,7 @@ describe("Challenge handshake", () => {
     await peerA.negotiate();
 
     const session = await timeout(
-      peerA.establish(null, new TestSessionHandler(), (challenge) => {
+      peerA.establish(undefined, new TestSessionHandler(), (challenge) => {
         expect(challenge).toBe("test-challenge");
       }),
     );
@@ -862,11 +922,165 @@ describe("Challenge handshake", () => {
   it("session send message", async () => {
     const [peerA] = await negotiatedPeers();
     const session = await timeout(
-      peerA.establish(null, new TestSessionHandler(), () => {}),
+      peerA.establish(undefined, new TestSessionHandler(), () => {}),
     );
     const response = await timeout(
-      session.requestCommand({ message: { content: [{ type: "text", text: "hello" }] } }),
+      session.requestCommand(genericCommand("message", { content: [{ type: "text", text: "hello" }] })),
     );
-    expect(response.kind).toBe("acknowledge");
+    expect(response.kind).toBe("generic");
+    if (response.kind === "generic") {
+      expect(response.name).toBe("acknowledge");
+    }
+  });
+});
+
+// ---- Interaction command lifecycle tests ----
+
+describe("Interaction commands", () => {
+  it("action request → approve response", async () => {
+    const [peerA] = await interactionPeers();
+    const session = await timeout(
+      peerA.establish(undefined, new TestSessionHandler(), () => {}),
+    );
+
+    const response = await timeout(
+      session.requestCommand(
+        genericCommand("action_request", {
+          activity: "act-1",
+          requestId: "req-1",
+          toolName: "bash",
+          arguments: '{"command":"ls"}',
+          actionId: "act-1",
+          description: "list files",
+          alert: "warn",
+          intent: "list files",
+        } satisfies ActionRequestPayload),
+      ),
+    );
+
+    expect(response.kind).toBe("generic");
+    if (response.kind === "generic") {
+      expect(response.name).toBe("action");
+      const data = response.data as ActionResponse;
+      expect(data.type).toBe("approve");
+    }
+  });
+
+  it("action request → reject response", async () => {
+    // Custom handler that rejects
+    const [a, b] = duplexPair();
+    const caps: Capabilities = { commands: [], events: [] };
+
+    class RejectHandler implements XacppSessionHandler {
+      async onCommand(command: XacppCommand): Promise<XacppResponse> {
+        if (typeof command === "object" && "generic" in command && command.generic.name === "action_request") {
+          const args = command.generic.arguments as ActionRequestPayload;
+          return genericResponse("action", { requestId: args.requestId, type: "reject", reason: "forbidden" });
+        }
+        return acknowledge();
+      }
+      async onEvent(): Promise<XacppResponse> {
+        return acknowledge();
+      }
+    }
+
+    class RejectEstablishHandler implements EstablishHandler {
+      async onEstablish(_t: XacppTransport, _c: string | undefined): Promise<EstablishDecision> {
+        return { type: "established", sessionId: "rej-sid", credentials: "rej-creds", handler: new RejectHandler() };
+      }
+      async onEstablishConfirm(_t: XacppTransport): Promise<{ sessionId: string; handler: XacppSessionHandler; credentials: string }> {
+        return { sessionId: "rej-sid", handler: new RejectHandler(), credentials: "rej-creds" };
+      }
+    }
+
+    const peerA = new XacppPeer(caps, a, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler());
+    const peerB = new XacppPeer(caps, b, new AcceptAllNegotiateHandler(), new RejectEstablishHandler());
+    await peerA.connect();
+    await peerB.connect();
+    await peerA.negotiate();
+
+    const session = await timeout(peerA.establish(undefined, new TestSessionHandler(), () => {}));
+
+    const response = await timeout(
+      session.requestCommand(
+        genericCommand("action_request", {
+          activity: "act-1",
+          requestId: "req-2",
+          toolName: "rm",
+          arguments: '{"command":"rm -rf /"}',
+          actionId: "act-2",
+          description: "dangerous",
+          alert: "critical",
+          intent: "delete everything",
+        } satisfies ActionRequestPayload),
+      ),
+    );
+
+    expect(response.kind).toBe("generic");
+    if (response.kind === "generic") {
+      expect(response.name).toBe("action");
+      const data = response.data as ActionResponse;
+      expect(data.type).toBe("reject");
+    }
+  });
+
+  it("question → answer response", async () => {
+    const [peerA] = await interactionPeers();
+    const session = await timeout(
+      peerA.establish(undefined, new TestSessionHandler(), () => {}),
+    );
+
+    const response = await timeout(
+      session.requestCommand(
+        genericCommand("question", {
+          activity: "act-1",
+          requestId: "req-q1",
+          question: "continue?",
+          options: ["yes", "no"],
+        } satisfies QuestionPayload),
+      ),
+    );
+
+    expect(response.kind).toBe("generic");
+    if (response.kind === "generic") {
+      expect(response.name).toBe("question");
+      const data = response.data as QuestionResponse;
+      expect(data.type).toBe("answer");
+      if (data.type === "answer") {
+        expect(data.content).toBe("yes");
+      }
+    }
+  });
+
+  it("sensitive info collect → provided results", async () => {
+    const [peerA] = await interactionPeers();
+    const session = await timeout(
+      peerA.establish(undefined, new TestSessionHandler(), () => {}),
+    );
+
+    const response = await timeout(
+      session.requestCommand(
+        genericCommand("sensitive_info_operation", {
+          activity: "act-1",
+          requestId: "req-si1",
+          operation: {
+            type: "collect",
+            items: [
+              { key: "API_KEY", displayText: "API Key", hint: "enter key", siType: "secret" },
+              { key: "DB_PASSWORD", displayText: "DB Password", hint: "enter password", siType: "secret" },
+            ],
+          },
+        } satisfies SensitiveInfoOperationPayload),
+      ),
+    );
+
+    expect(response.kind).toBe("generic");
+    if (response.kind === "generic") {
+      expect(response.name).toBe("sensitive_info_operation");
+      const data = response.data as { results: SensitiveInfoResult[] };
+      expect(data.results).toHaveLength(2);
+      expect(data.results[0].type).toBe("provided");
+      expect(data.results[0].type === "provided" ? data.results[0].key : "").toBe("API_KEY");
+    }
   });
 });

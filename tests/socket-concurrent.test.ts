@@ -14,7 +14,9 @@ import * as net from "node:net";
 
 import type { RequestHandler } from "../src/transport";
 import type { XacppCommand } from "../src/commands";
+import { genericCommand } from "../src/commands";
 import type { XacppRequest, XacppResponse } from "../src/message";
+import { genericResponse } from "../src/message";
 import { SocketTransport } from "../src/socket-transport";
 
 // ---- Helper functions ----
@@ -38,7 +40,7 @@ async function socketPair(
 
   // Client: connectTo
   const clientTransport = SocketTransport.connectTo(addr.port, "127.0.0.1");
-  clientTransport.onRequest(async (_sessionId, _payload) => ({ kind: "acknowledge" as const }));
+  clientTransport.onRequest(async (_sessionId, _payload) => genericResponse("acknowledge", null));
   await clientTransport.connect();
 
   const serverTransport = await serverTransportP;
@@ -69,24 +71,14 @@ function timeout<T>(promise: Promise<T>, ms = 5000): Promise<T> {
   });
 }
 
-/** Extract command tag from XacppRequest (used in test 1). */
-function commandTag(payload: XacppRequest): string {
-  if (payload.kind !== "command") return "other";
+/** Extract command name from XacppRequest (used in test 1). */
+function commandName(payload: XacppRequest): string {
+  if (payload.kind !== "command") return "event";
   const cmd: XacppCommand = payload.payload;
-  if (typeof cmd === "string") {
-    // "last_activity" → "last", etc.
-    if (cmd === "last_activity") return "last";
-    return cmd.replace(/_activity$/, "");
-  }
-  if (typeof cmd === "object") {
-    if ("establish" in cmd) return "establish";
-    if ("new_activity" in cmd) return "new";
-    if ("invoke_activity" in cmd) return "invoke";
-    if ("compact_activity" in cmd) return "compact";
-    if ("cancel_activity" in cmd) return "cancel";
-    if ("list_activity" in cmd) return "list";
-    if ("switch_activity" in cmd) return "switch";
-  }
+  if (typeof cmd === "string") return cmd; // "establish_confirm"
+  if ("generic" in cmd) return cmd.generic.name;
+  if ("establish" in cmd) return "establish";
+  if ("negotiate" in cmd) return "negotiate";
   return "other";
 }
 
@@ -96,26 +88,26 @@ describe("SocketTransport concurrent", () => {
   // ---- Test 1: concurrent requests processed independently ----
 
   it("concurrent requests independent processing", async () => {
-    // Server handler: sleep 10ms then return established response with command tag
+    // Server handler: sleep 10ms then return generic response with command name
     const handler: RequestHandler = async (_sessionId, payload) => {
       await new Promise((r) => setTimeout(r, 10));
-      const sid = commandTag(payload);
-      return { kind: "established", sessionId: sid, credentials: `creds-${sid}` };
+      const name = commandName(payload);
+      return genericResponse(name, null);
     };
     const { client, cleanup } = await socketPair(handler);
 
     const commands: XacppCommand[] = [
-      { new_activity: { title: null } },
-      { invoke_activity: { activity: "act-1", messages: [] } },
-      { compact_activity: { activity: "act-1" } },
-      { cancel_activity: { activity: "act-1" } },
-      { establish: { credentials: null } },
-      "last_activity",
-      { list_activity: { pageNum: 1, pageSize: 10 } },
-      { switch_activity: { activity: "act-1" } },
+      genericCommand("new_activity", { title: null }),
+      genericCommand("invoke_activity", { activity: "act-1", messages: [] }),
+      genericCommand("compact_activity", { activity: "act-1" }),
+      genericCommand("cancel_activity", { activity: "act-1" }),
+      { establish: { credentials: undefined } },
+      genericCommand("last_activity", null),
+      genericCommand("list_activity", { pageNum: 1, pageSize: 10 }),
+      genericCommand("switch_activity", { activity: "act-1" }),
     ];
 
-    // Send 5 concurrent requests, measure time
+    // Send 8 concurrent requests, measure time
     const start = Date.now();
     const promises = commands.map((cmd) =>
       client.send(null, { kind: "command", payload: cmd }),
@@ -123,17 +115,26 @@ describe("SocketTransport concurrent", () => {
     const responses = await Promise.all(promises.map((p) => timeout(p)));
     const elapsed = Date.now() - start;
 
-    // Collect sessionId from responses (command tags)
-    const sids = responses
+    // Collect command names from responses
+    const names = responses
       .map((r) => {
-        if (r.kind !== "established")
-          throw new Error(`expected established, got: ${JSON.stringify(r)}`);
-        return (r as { kind: "established"; sessionId: string }).sessionId;
+        if (r.kind !== "generic")
+          throw new Error(`expected generic, got: ${JSON.stringify(r)}`);
+        return (r as { kind: "generic"; name: string }).name;
       })
       .sort();
 
     // All 8 responses received, no cross-talk
-    expect(sids).toEqual(["cancel", "compact", "establish", "invoke", "last", "list", "new", "switch"]);
+    expect(names).toEqual([
+      "cancel_activity",
+      "compact_activity",
+      "establish",
+      "invoke_activity",
+      "last_activity",
+      "list_activity",
+      "new_activity",
+      "switch_activity",
+    ]);
 
     // Concurrent elapsed < 50ms (serial would need 8×10ms=80ms)
     expect(elapsed).toBeLessThan(50);
@@ -144,26 +145,26 @@ describe("SocketTransport concurrent", () => {
   // ---- Test 2: concurrent write no data corruption ----
 
   it("concurrent write no data corruption", async () => {
-    // Server handler: return 1KB text
+    // Server handler: return 1KB text in generic response name
     const largeContent = "A".repeat(1024);
     const handler: RequestHandler = async (_sessionId, _payload) => {
-      return { kind: "established", sessionId: largeContent, credentials: largeContent };
+      return genericResponse(largeContent, null);
     };
     const { client, cleanup } = await socketPair(handler);
 
     // Send 10 concurrent requests
     const promises = Array.from({ length: 10 }, () =>
-      client.send(null, { kind: "command", payload: { new_activity: { title: null } } }),
+      client.send(null, { kind: "command", payload: genericCommand("new_activity", { title: null }) }),
     );
     const responses = await Promise.all(promises.map((p) => timeout(p)));
 
-    // Each response content is intact (1KB, no truncation or corruption)
+    // Each response name is intact (1KB, no truncation or corruption)
     for (const [i, resp] of responses.entries()) {
-      if (resp.kind !== "established")
-        throw new Error(`response ${i}: expected established, got: ${JSON.stringify(resp)}`);
-      const { sessionId } = resp as { kind: "established"; sessionId: string };
-      expect(sessionId.length).toBe(1024);
-      expect(sessionId.split("").every((c) => c === "A")).toBe(true);
+      if (resp.kind !== "generic")
+        throw new Error(`response ${i}: expected generic, got: ${JSON.stringify(resp)}`);
+      const { name } = resp as { kind: "generic"; name: string };
+      expect(name.length).toBe(1024);
+      expect(name.split("").every((c) => c === "A")).toBe(true);
     }
 
     cleanup();
@@ -182,7 +183,7 @@ describe("SocketTransport concurrent", () => {
 
     // Send 3 requests (handler will block)
     const sendPromises = Array.from({ length: 3 }, () =>
-      client.send(null, { kind: "command", payload: { new_activity: { title: null } } }),
+      client.send(null, { kind: "command", payload: genericCommand("new_activity", { title: null }) }),
     );
 
     // Wait to ensure requests have been sent and received by handler

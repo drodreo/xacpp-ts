@@ -1,12 +1,12 @@
 /**
  * XACPP protocol command types.
  *
- * Commands are transmitted via transport, driving the interaction flow between the initiator and the peer.
+ * Commands are request-response: the sender always expects a Response.
  *
- * Establish replaces the legacy Paring/Authenticate, unifying handshake and session establishment.
+ * Protocol commands (Negotiate/Establish/EstablishConfirm) are handled by the Peer layer.
+ * Business commands use the Generic variant.
  */
 
-import type { ContentPart } from "../events/content";
 import type { Capabilities } from "../capability";
 
 /** XACPP protocol command. */
@@ -15,21 +15,21 @@ export type XacppCommand =
   | { negotiate: { capabilities: Capabilities } }
   /** Establish logical session. */
   | { establish: { credentials?: string } }
-  /** Confirm establishment after challenge verification (phase 3 of 3-way handshake). */
+  /** Confirm establishment after challenge verification. */
   | "establish_confirm"
-  /** Resume the last active Activity. */
-  | "last_activity"
-  /** Create a new Activity session. */
-  | { new_activity: { title?: string } }
-  /** List available Activities with pagination. */
-  | { list_activity: { query?: string; pageNum: number; pageSize: number } }
-  /** Switch to an existing Activity. */
-  | { switch_activity: { activity: string } }
-  /** Invoke an existing Activity to perform an operation. */
-  | { invoke_activity: { activity: string; messages: ContentPart[] } }
-  /** Compact Activity (reclaim resources / generate snapshot summary). */
-  | { compact_activity: { activity: string } }
-  /** Cancel Activity. */
-  | { cancel_activity: { activity: string } }
-  /** Send a message outside of any activity context. */
-  | { message: { content: ContentPart[] } };
+  /** Generic business command. */
+  | { generic: { name: string; arguments: unknown } };
+
+/** Convenience constructor for generic business commands. */
+export function genericCommand(name: string, args: unknown): XacppCommand {
+  return { generic: { name, arguments: args } };
+}
+
+/** Extracts the command name for capability-matching purposes. */
+export function commandName(cmd: XacppCommand): string {
+  if (typeof cmd === "string") return cmd;
+  if ("negotiate" in cmd) return "negotiate";
+  if ("establish" in cmd) return "establish";
+  if ("generic" in cmd) return cmd.generic.name;
+  return "unknown";
+}

@@ -1,27 +1,64 @@
 /**
  * Serialization / deserialization correctness tests.
  *
- * Aligned with xacpp-rs/tests/serde_tests.rs, 15 test cases.
+ * Aligned with xacpp-rs/tests/serde_tests.rs.
  * Key verifications:
- * 1. XacppEvent JSON round-trip (type field routing)
- * 2. XacppEnvelope envelope layer JSON round-trip (type field outer routing + session_id)
- * 3. XacppResponse variant JSON format (kind field + flatten field + camelCase)
- * 4. Deserialization from hand-written JSON (verifies adjacently tagged format)
- * 5. ActionRequest serialization without responder field
+ * 1. XacppEvent JSON round-trip (generic { name, data } structure)
+ * 2. XacppEnvelope envelope layer JSON round-trip (outer type routing + session_id)
+ * 3. XacppResponse variant JSON format (kind field + camelCase)
+ * 4. Deserialization from hand-written JSON
+ * 5. Generic Command round-trip
+ * 6. Convenience constructors
+ * 7. Interaction payload serialization (no responder field)
+ * 8. FileRef round-trip
  */
 
 import { describe, it, expect } from "vitest";
 import type { FileRef } from "../src/events/content";
 import type { XacppEvent } from "../src/events/xacpp_event";
-import type { XacppEnvelope, XacppRequest, XacppResponse } from "../src/message";
-import type { ActivityInfo } from "../src/message";
+import { newEvent } from "../src/events/xacpp_event";
+import type { XacppEnvelope } from "../src/message";
+import { acknowledge, genericResponse, errorResponse } from "../src/message";
+import type { XacppCommand } from "../src/commands";
+import { genericCommand } from "../src/commands";
+import type {
+  ActionRequestPayload,
+  QuestionPayload,
+  SensitiveInfoOperationPayload,
+} from "../src/events/interaction";
 
 // ---- XacppEvent round-trip ----
 
 describe("XacppEvent serialization", () => {
-  it("test_event_action_request_roundtrip", () => {
+  it("generic event roundtrip", () => {
     const event: XacppEvent = {
-      type: "action_request",
+      name: "think",
+      data: { content: "thinking..." },
+    };
+
+    const json = JSON.stringify(event);
+    expect(json).toContain('"name":"think"');
+    expect(json).toContain('"content":"thinking..."');
+
+    const de: XacppEvent = JSON.parse(json);
+    expect(de.name).toBe("think");
+    expect((de.data as { content: string }).content).toBe("thinking...");
+  });
+
+  it("event via newEvent constructor", () => {
+    const event = newEvent("info", { title: "started", content: "" });
+
+    const json = JSON.stringify(event);
+    expect(json).toContain('"name":"info"');
+
+    const de: XacppEvent = JSON.parse(json);
+    expect(de.name).toBe("info");
+    expect((de.data as { title: string }).title).toBe("started");
+  });
+
+  it("event with complex nested data roundtrip", () => {
+    const event = newEvent("action_request", {
+      activity: "act-1",
       requestId: "req-1",
       toolName: "bash",
       arguments: '{"command":"ls"}',
@@ -29,101 +66,60 @@ describe("XacppEvent serialization", () => {
       description: "list files",
       alert: "warn",
       intent: "list files",
-    };
+    });
 
     const json = JSON.stringify(event);
-    expect(json).toContain('"type":"action_request"');
+    expect(json).toContain('"name":"action_request"');
 
     const de: XacppEvent = JSON.parse(json);
-    expect(de.type).toBe("action_request");
-    if (de.type === "action_request") {
-      expect(de.requestId).toBe("req-1");
-      expect(de.toolName).toBe("bash");
-    }
+    expect(de.name).toBe("action_request");
+    const data = de.data as ActionRequestPayload;
+    expect(data.requestId).toBe("req-1");
+    expect(data.toolName).toBe("bash");
   });
 
-  it("test_event_think_roundtrip", () => {
-    const event: XacppEvent = {
-      type: "think",
-      content: "thinking...",
-    };
+  it("event with null data roundtrip", () => {
+    const event: XacppEvent = { name: "ping", data: null };
 
     const json = JSON.stringify(event);
-    expect(json).toContain('"type":"think"');
+    expect(json).toBe('{"name":"ping","data":null}');
 
     const de: XacppEvent = JSON.parse(json);
-    expect(de.type).toBe("think");
-    if (de.type === "think") {
-      expect(de.content).toBe("thinking...");
-    }
-  });
-
-  it("test_event_question_roundtrip", () => {
-    const event: XacppEvent = {
-      type: "question",
-      requestId: "req-2",
-      question: "continue?",
-      options: ["yes", "no"],
-    };
-
-    const json = JSON.stringify(event);
-    expect(json).toContain('"type":"question"');
-
-    const de: XacppEvent = JSON.parse(json);
-    expect(de.type).toBe("question");
-    if (de.type === "question") {
-      expect(de.requestId).toBe("req-2");
-      expect(de.options).toEqual(["yes", "no"]);
-    }
-  });
-
-  it("test_event_sensitive_info_roundtrip", () => {
-    const event: XacppEvent = {
-      type: "sensitive_info_operation",
-      requestId: "req-3",
-      operation: {
-        type: "collect",
-        items: [
-          {
-            key: "API_KEY",
-            displayText: "API Key",
-            hint: "enter your key",
-            siType: "secret",
-          },
-        ],
-      },
-    };
-
-    const json = JSON.stringify(event);
-    expect(json).toContain('"type":"sensitive_info_operation"');
-
-    const de: XacppEvent = JSON.parse(json);
-    expect(de.type).toBe("sensitive_info_operation");
-  });
-
-  it("test_event_info_roundtrip", () => {
-    const event: XacppEvent = {
-      type: "info",
-      title: "started",
-      content: "",
-    };
-
-    const json = JSON.stringify(event);
-    expect(json).toContain('"type":"info"');
-
-    const de: XacppEvent = JSON.parse(json);
-    expect(de.type).toBe("info");
-    if (de.type === "info") {
-      expect(de.title).toBe("started");
-    }
+    expect(de.name).toBe("ping");
+    expect(de.data).toBeNull();
   });
 });
 
 // ---- XacppEnvelope round-trip ----
 
 describe("XacppEnvelope serialization", () => {
-  it("test_wire_request_command_roundtrip", () => {
-    // Establish command (replaces legacy Authenticate string enum), envelope has no session_id
+  it("wire request negotiate command roundtrip", () => {
+    const wire: XacppEnvelope = {
+      type: "request",
+      id: "r1",
+      payload: {
+        kind: "command",
+        payload: { negotiate: { capabilities: { commands: [], events: [] } } },
+      },
+    };
+
+    const json = JSON.stringify(wire);
+    expect(json).toContain('"type":"request"');
+    expect(json).toContain('"id":"r1"');
+    expect(json).toContain('"kind":"command"');
+    expect(json).toContain('"negotiate"');
+    // session_id is not serialized when absent
+    expect(json).not.toContain('"session_id"');
+
+    const de: XacppEnvelope = JSON.parse(json);
+    expect(de.type).toBe("request");
+    if (de.type === "request") {
+      expect(de.id).toBe("r1");
+      expect(de.payload.kind).toBe("command");
+    }
+  });
+
+  it("wire request establish command roundtrip", () => {
     const wire: XacppEnvelope = {
       type: "request",
       id: "r1",
@@ -134,44 +130,52 @@ describe("XacppEnvelope serialization", () => {
     };
 
     const json = JSON.stringify(wire);
-    expect(json).toContain('"type":"request"');
-    expect(json).toContain('"id":"r1"');
-    expect(json).toContain('"kind":"command"');
-    // Establish command is in object form on the wire
     expect(json).toContain('"establish"');
     expect(json).toContain('"credentials":null');
-    // session_id is not serialized when absent
-    expect(json).not.toContain('"session_id"');
 
     const de: XacppEnvelope = JSON.parse(json);
     expect(de.type).toBe("request");
     if (de.type === "request") {
-      expect(de.id).toBe("r1");
       expect(de.payload.kind).toBe("command");
-      if (de.payload.kind === "command") {
-        const cmd = de.payload.payload;
-        expect(cmd).toEqual({ establish: { credentials: null } });
-      }
     }
   });
 
-  it("test_wire_request_event_with_session_id_roundtrip", () => {
+  it("wire request generic command with session_id roundtrip", () => {
+    const wire: XacppEnvelope = {
+      type: "request",
+      id: "r2",
+      session_id: "s1",
+      payload: {
+        kind: "command",
+        payload: { generic: { name: "new_activity", arguments: { title: "test" } } },
+      },
+    };
+
+    const json = JSON.stringify(wire);
+    expect(json).toContain('"type":"request"');
+    expect(json).toContain('"id":"r2"');
+    expect(json).toContain('"session_id":"s1"');
+    expect(json).toContain('"kind":"command"');
+    expect(json).toContain('"generic"');
+    expect(json).toContain('"name":"new_activity"');
+
+    const de: XacppEnvelope = JSON.parse(json);
+    expect(de.type).toBe("request");
+    if (de.type === "request") {
+      expect(de.id).toBe("r2");
+      expect(de.session_id).toBe("s1");
+      expect(de.payload.kind).toBe("command");
+    }
+  });
+
+  it("wire request event with session_id roundtrip", () => {
     const wire: XacppEnvelope = {
       type: "request",
       id: "r2",
       session_id: "s1",
       payload: {
         kind: "event",
-        payload: {
-          type: "action_request",
-          requestId: "req-1",
-          toolName: "bash",
-          arguments: "{}",
-          actionId: "act-1",
-          description: "test",
-          alert: "info",
-          intent: "test",
-        },
+        payload: { activity: "act-1", event: { name: "think", data: { content: "hi" } } },
       },
     };
 
@@ -180,22 +184,38 @@ describe("XacppEnvelope serialization", () => {
     expect(json).toContain('"id":"r2"');
     expect(json).toContain('"session_id":"s1"');
     expect(json).toContain('"kind":"event"');
-    expect(json).toContain('"type":"action_request"');
+    expect(json).toContain('"name":"think"');
 
     const de: XacppEnvelope = JSON.parse(json);
     expect(de.type).toBe("request");
     if (de.type === "request") {
-      expect(de.id).toBe("r2");
       expect(de.session_id).toBe("s1");
       expect(de.payload.kind).toBe("event");
-      if (de.payload.kind === "event" && de.payload.payload.type === "action_request") {
-        expect(de.payload.payload.requestId).toBe("req-1");
-      }
     }
   });
 
-  it("test_wire_response_established_roundtrip", () => {
-    // Replaces legacy paring, verifies sessionId (camelCase)
+  it("wire response negotiated roundtrip", () => {
+    const wire: XacppEnvelope = {
+      type: "response",
+      id: "r1",
+      payload: {
+        kind: "negotiated",
+        capabilities: { commands: [], events: [] },
+      },
+    };
+
+    const json = JSON.stringify(wire);
+    expect(json).toContain('"type":"response"');
+    expect(json).toContain('"kind":"negotiated"');
+
+    const de: XacppEnvelope = JSON.parse(json);
+    expect(de.type).toBe("response");
+    if (de.type === "response" && de.payload.kind === "negotiated") {
+      expect(de.payload.capabilities).toBeDefined();
+    }
+  });
+
+  it("wire response established roundtrip", () => {
     const wire: XacppEnvelope = {
       type: "response",
       id: "r1",
@@ -208,106 +228,108 @@ describe("XacppEnvelope serialization", () => {
 
     const json = JSON.stringify(wire);
     expect(json).toContain('"type":"response"');
-    expect(json).toContain('"id":"r1"');
     expect(json).toContain('"kind":"established"');
     // Response payload inner fields use camelCase
     expect(json).toContain('"sessionId":"s1"');
 
     const de: XacppEnvelope = JSON.parse(json);
     expect(de.type).toBe("response");
-    if (de.type === "response") {
-      expect(de.id).toBe("r1");
-      if (de.payload.kind === "established") {
-        expect(de.payload.sessionId).toBe("s1");
-      }
+    if (de.type === "response" && de.payload.kind === "established") {
+      expect(de.payload.sessionId).toBe("s1");
     }
   });
 
-  it("test_wire_response_action_roundtrip", () => {
+  it("wire response establish_prepare roundtrip", () => {
+    const wire: XacppEnvelope = {
+      type: "response",
+      id: "r1",
+      payload: {
+        kind: "establish_prepare",
+        challenge: "prove-your-identity",
+      },
+    };
+
+    const json = JSON.stringify(wire);
+    expect(json).toContain('"kind":"establish_prepare"');
+    expect(json).toContain('"challenge":"prove-your-identity"');
+
+    const de: XacppEnvelope = JSON.parse(json);
+    if (de.type === "response" && de.payload.kind === "establish_prepare") {
+      expect(de.payload.challenge).toBe("prove-your-identity");
+    }
+  });
+
+  it("wire response establish_reject roundtrip", () => {
+    const wire: XacppEnvelope = {
+      type: "response",
+      id: "r1",
+      payload: {
+        kind: "establish_reject",
+        reason: "invalid credentials",
+      },
+    };
+
+    const json = JSON.stringify(wire);
+    expect(json).toContain('"kind":"establish_reject"');
+    expect(json).toContain('"reason":"invalid credentials"');
+
+    const de: XacppEnvelope = JSON.parse(json);
+    if (de.type === "response" && de.payload.kind === "establish_reject") {
+      expect(de.payload.reason).toBe("invalid credentials");
+    }
+  });
+
+  it("wire response generic roundtrip", () => {
     const wire: XacppEnvelope = {
       type: "response",
       id: "r2",
       payload: {
-        kind: "action",
-        requestId: "req-1",
-        type: "approve",
+        kind: "generic",
+        name: "activity_list",
+        data: { activities: ["act-1", "act-2"] },
       },
     };
 
     const json = JSON.stringify(wire);
     expect(json).toContain('"type":"response"');
-    expect(json).toContain('"kind":"action"');
-    expect(json).toContain('"requestId":"req-1"');
-    // flatten: type field appears directly at response level
-    expect(json).toContain('"type":"approve"');
+    expect(json).toContain('"kind":"generic"');
+    expect(json).toContain('"name":"activity_list"');
+    expect(json).toContain('"activities"');
 
     const de: XacppEnvelope = JSON.parse(json);
     expect(de.type).toBe("response");
-    if (de.type === "response") {
-      if (de.payload.kind === "action") {
-        expect(de.payload.requestId).toBe("req-1");
-        expect(de.payload.type).toBe("approve");
-      }
+    if (de.type === "response" && de.payload.kind === "generic") {
+      expect(de.payload.name).toBe("activity_list");
+      expect((de.payload.data as { activities: string[] }).activities).toEqual(["act-1", "act-2"]);
     }
   });
 
-  it("test_wire_response_sensitive_info_operation_roundtrip", () => {
-    const wire: XacppEnvelope = {
-      type: "response",
-      id: "r5",
-      payload: {
-        kind: "sensitive_info_operation",
-        requestId: "req-1",
-        results: [
-          {
-            type: "provided",
-            key: "API_KEY",
-            value: "secret",
-          },
-        ],
-      },
-    };
-
-    const json = JSON.stringify(wire);
-    expect(json).toContain('"type":"response"');
-    expect(json).toContain('"kind":"sensitive_info_operation"');
-    expect(json).toContain('"requestId":"req-1"');
-    // flatten: results appear directly at response level
-    expect(json).toContain('"results"');
-
-    const de: XacppEnvelope = JSON.parse(json);
-    expect(de.type).toBe("response");
-    if (de.type === "response") {
-      if (de.payload.kind === "sensitive_info_operation") {
-        expect(de.payload.requestId).toBe("req-1");
-        expect(de.payload.results).toHaveLength(1);
-      }
-    }
-  });
-
-  it("test_wire_response_acknowledge_roundtrip", () => {
+  it("wire response acknowledge (generic) roundtrip", () => {
     const wire: XacppEnvelope = {
       type: "response",
       id: "r3",
       payload: {
-        kind: "acknowledge",
+        kind: "generic",
+        name: "acknowledge",
+        data: null,
       },
     };
 
     const json = JSON.stringify(wire);
     expect(json).toContain('"type":"response"');
     expect(json).toContain('"id":"r3"');
-    expect(json).toContain('"kind":"acknowledge"');
+    expect(json).toContain('"kind":"generic"');
+    expect(json).toContain('"name":"acknowledge"');
 
     const de: XacppEnvelope = JSON.parse(json);
     expect(de.type).toBe("response");
     if (de.type === "response") {
       expect(de.id).toBe("r3");
-      expect(de.payload.kind).toBe("acknowledge");
+      expect(de.payload.kind).toBe("generic");
     }
   });
 
-  it("test_wire_response_error_roundtrip", () => {
+  it("wire response error roundtrip", () => {
     const wire: XacppEnvelope = {
       type: "response",
       id: "r4",
@@ -327,12 +349,9 @@ describe("XacppEnvelope serialization", () => {
 
     const de: XacppEnvelope = JSON.parse(json);
     expect(de.type).toBe("response");
-    if (de.type === "response") {
-      expect(de.id).toBe("r4");
-      if (de.payload.kind === "error") {
-        expect(de.payload.code).toBe("internal_error");
-        expect(de.payload.message).toBe("something went wrong");
-      }
+    if (de.type === "response" && de.payload.kind === "error") {
+      expect(de.payload.code).toBe("internal_error");
+      expect(de.payload.message).toBe("something went wrong");
     }
   });
 });
@@ -340,192 +359,224 @@ describe("XacppEnvelope serialization", () => {
 // ---- Deserialization from hand-written JSON ----
 
 describe("JSON deserialization", () => {
-  it("test_deserialize_request_from_json", () => {
-    // Request envelope containing Establish command
+  it("deserialize establish request from json", () => {
     const json = '{"type":"request","id":"r1","payload":{"kind":"command","payload":{"establish":{"credentials":null}}}}';
     const de: XacppEnvelope = JSON.parse(json);
     expect(de.type).toBe("request");
     if (de.type === "request") {
       expect(de.id).toBe("r1");
       expect(de.payload.kind).toBe("command");
-      if (de.payload.kind === "command") {
-        expect(de.payload.payload).toEqual({ establish: { credentials: null } });
-      }
     }
   });
 
-  it("test_deserialize_response_from_json", () => {
-    // Envelope containing established response
-    const json = '{"type":"response","id":"r1","payload":{"kind":"established","sessionId":"s1"}}';
+  it("deserialize generic command request from json", () => {
+    const json = '{"type":"request","id":"r1","session_id":"s1","payload":{"kind":"command","payload":{"generic":{"name":"new_activity","arguments":{"title":"test"}}}}}';
+    const de: XacppEnvelope = JSON.parse(json);
+    expect(de.type).toBe("request");
+    if (de.type === "request") {
+      expect(de.id).toBe("r1");
+      expect(de.session_id).toBe("s1");
+      expect(de.payload.kind).toBe("command");
+    }
+  });
+
+  it("deserialize established response from json", () => {
+    const json = '{"type":"response","id":"r1","payload":{"kind":"established","sessionId":"s1","credentials":"c"}}';
     const de: XacppEnvelope = JSON.parse(json);
     expect(de.type).toBe("response");
-    if (de.type === "response") {
-      expect(de.id).toBe("r1");
-      if (de.payload.kind === "established") {
-        expect(de.payload.sessionId).toBe("s1");
-      }
+    if (de.type === "response" && de.payload.kind === "established") {
+      expect(de.payload.sessionId).toBe("s1");
+    }
+  });
+
+  it("deserialize generic response from json", () => {
+    const json = '{"type":"response","id":"r1","payload":{"kind":"generic","name":"acknowledge","data":null}}';
+    const de: XacppEnvelope = JSON.parse(json);
+    expect(de.type).toBe("response");
+    if (de.type === "response" && de.payload.kind === "generic") {
+      expect(de.payload.name).toBe("acknowledge");
     }
   });
 });
 
-// ---- Interactive event responder skip verification ----
+// ---- Generic Command round-trip ----
 
-describe("ActionRequest without responder", () => {
-  it("test_action_request_serializes_without_responder", () => {
-    // TS-side ActionRequestEvent has no responder field
-    const event: XacppEvent = {
-      type: "action_request",
+describe("Generic command serialization", () => {
+  it("generic command via genericCommand() roundtrip", () => {
+    const cmd = genericCommand("new_activity", { title: "test" });
+    const json = JSON.stringify(cmd);
+    expect(json).toContain('"generic"');
+    expect(json).toContain('"name":"new_activity"');
+    expect(json).toContain('"title":"test"');
+
+    const de = JSON.parse(json) as XacppCommand;
+    expect("generic" in de).toBe(true);
+    if ("generic" in de) {
+      expect(de.generic.name).toBe("new_activity");
+      expect((de.generic.arguments as { title: string }).title).toBe("test");
+    }
+  });
+
+  it("generic command literal roundtrip", () => {
+    const cmd: XacppCommand = { generic: { name: "list_activities", arguments: { pageNum: 1, pageSize: 10 } } };
+    const json = JSON.stringify(cmd);
+    expect(json).toContain('"name":"list_activities"');
+    expect(json).toContain('"pageNum":1');
+
+    const de = JSON.parse(json) as XacppCommand;
+    expect(de).toEqual(cmd);
+  });
+
+  it("negotiate command roundtrip", () => {
+    const cmd: XacppCommand = { negotiate: { capabilities: { commands: [], events: [] } } };
+    const json = JSON.stringify(cmd);
+    expect(json).toContain('"negotiate"');
+
+    const de = JSON.parse(json) as XacppCommand;
+    expect("negotiate" in de).toBe(true);
+  });
+
+  it("establish command roundtrip", () => {
+    const cmd: XacppCommand = { establish: { credentials: "test-creds" } };
+    const json = JSON.stringify(cmd);
+    expect(json).toContain('"establish"');
+    expect(json).toContain('"credentials":"test-creds"');
+
+    const de = JSON.parse(json) as XacppCommand;
+    expect("establish" in de).toBe(true);
+  });
+
+  it("establish_confirm command roundtrip", () => {
+    const cmd: XacppCommand = "establish_confirm";
+    const json = JSON.stringify(cmd);
+    expect(json).toBe('"establish_confirm"');
+
+    const de = JSON.parse(json) as XacppCommand;
+    expect(de).toBe("establish_confirm");
+  });
+});
+
+// ---- Convenience constructors ----
+
+describe("Convenience constructors", () => {
+  it("acknowledge() returns generic acknowledge", () => {
+    const resp = acknowledge();
+    expect(resp.kind).toBe("generic");
+    if (resp.kind === "generic") {
+      expect(resp.name).toBe("acknowledge");
+      expect(resp.data).toBeNull();
+    }
+  });
+
+  it("genericResponse() returns generic with name and data", () => {
+    const resp = genericResponse("activity_list", { total: 2 });
+    expect(resp.kind).toBe("generic");
+    if (resp.kind === "generic") {
+      expect(resp.name).toBe("activity_list");
+      expect((resp.data as { total: number }).total).toBe(2);
+    }
+  });
+
+  it("errorResponse() returns error", () => {
+    const resp = errorResponse("custom_error", "something failed");
+    expect(resp.kind).toBe("error");
+    if (resp.kind === "error") {
+      expect(resp.code).toBe("custom_error");
+      expect(resp.message).toBe("something failed");
+    }
+  });
+
+  it("newEvent() creates event with name and data", () => {
+    const event = newEvent("think", { content: "hello" });
+    expect(event.name).toBe("think");
+    expect((event.data as { content: string }).content).toBe("hello");
+  });
+});
+
+// ---- Interaction payload serialization (no responder) ----
+
+describe("Interaction payload serialization", () => {
+  it("ActionRequestPayload roundtrip without responder", () => {
+    const payload: ActionRequestPayload = {
+      activity: "act-1",
       requestId: "req-r",
       toolName: "bash",
-      arguments: "{}",
+      arguments: '{"command":"ls"}',
       actionId: "act-r",
       description: "test",
       alert: "info",
       intent: "test",
     };
 
-    const json = JSON.stringify(event);
-    // Verify serialization works correctly, does not include responder
+    const json = JSON.stringify(payload);
+    // No responder field (removed in new protocol)
     expect(json).not.toContain("responder");
     expect(json).toContain('"requestId":"req-r"');
+    expect(json).toContain('"toolName":"bash"');
 
-    const de: XacppEvent = JSON.parse(json);
-    expect(de.type).toBe("action_request");
-  });
-});
-
-// ---- New Command / Response / Event round-trip tests ----
-
-describe("New types serialization", () => {
-  it("command last_activity roundtrip", () => {
-    const cmd: XacppCommand = "last_activity";
-    const json = JSON.stringify(cmd);
-    expect(json).toBe('"last_activity"');
-
-    const de: XacppCommand = JSON.parse(json);
-    expect(de).toBe("last_activity");
+    const de = JSON.parse(json) as ActionRequestPayload;
+    expect(de.requestId).toBe("req-r");
+    expect(de.toolName).toBe("bash");
   });
 
-  it("command list_activity with query roundtrip", () => {
-    const cmd: XacppCommand = { list_activity: { query: "test", pageNum: 1, pageSize: 10 } };
-    const json = JSON.stringify(cmd);
-    expect(json).toContain('"list_activity"');
-    expect(json).toContain('"query":"test"');
-    expect(json).toContain('"pageNum":1');
-    expect(json).toContain('"pageSize":10');
-
-    const de: XacppCommand = JSON.parse(json);
-    expect(de).toEqual(cmd);
-  });
-
-  it("command list_activity without query roundtrip", () => {
-    const cmd: XacppCommand = { list_activity: { pageNum: 1, pageSize: 10 } };
-    const json = JSON.stringify(cmd);
-    expect(json).toContain('"list_activity"');
-    expect(json).not.toContain("query");
-    expect(json).toContain('"pageNum":1');
-    expect(json).toContain('"pageSize":10');
-
-    const de: XacppCommand = JSON.parse(json);
-    expect(de).toEqual(cmd);
-  });
-
-  it("command switch_activity roundtrip", () => {
-    const cmd: XacppCommand = { switch_activity: { activity: "act-1" } };
-    const json = JSON.stringify(cmd);
-    expect(json).toContain('"switch_activity"');
-    expect(json).toContain('"activity":"act-1"');
-
-    const de: XacppCommand = JSON.parse(json);
-    expect(de).toEqual(cmd);
-  });
-
-  it("response activity_ready roundtrip", () => {
-    const wire: XacppEnvelope = {
-      type: "response",
-      id: "r1",
-      payload: {
-        kind: "activity_ready",
-        activity: "act-1",
-        agent: "x-agent",
-        title: "test title",
-      },
+  it("QuestionPayload roundtrip", () => {
+    const payload: QuestionPayload = {
+      activity: "act-1",
+      requestId: "req-2",
+      question: "continue?",
+      options: ["yes", "no"],
     };
-    const json = JSON.stringify(wire);
-    expect(json).toContain('"kind":"activity_ready"');
-    expect(json).toContain('"activity":"act-1"');
-    expect(json).toContain('"agent":"x-agent"');
-    expect(json).toContain('"title":"test title"');
 
-    const de: XacppEnvelope = JSON.parse(json);
-    expect(de.type).toBe("response");
-    if (de.type === "response" && de.payload.kind === "activity_ready") {
-      expect(de.payload.activity).toBe("act-1");
-      expect(de.payload.agent).toBe("x-agent");
-      expect(de.payload.title).toBe("test title");
-    }
+    const json = JSON.stringify(payload);
+    const de = JSON.parse(json) as QuestionPayload;
+    expect(de.question).toBe("continue?");
+    expect(de.options).toEqual(["yes", "no"]);
   });
 
-  it("response activity_not_found roundtrip", () => {
-    const wire: XacppEnvelope = {
-      type: "response",
-      id: "r1",
-      payload: { kind: "activity_not_found" },
-    };
-    const json = JSON.stringify(wire);
-    expect(json).toContain('"kind":"activity_not_found"');
-
-    const de: XacppEnvelope = JSON.parse(json);
-    expect(de.type).toBe("response");
-    if (de.type === "response") {
-      expect(de.payload.kind).toBe("activity_not_found");
-    }
-  });
-
-  it("response available_activities roundtrip", () => {
-    const wire: XacppEnvelope = {
-      type: "response",
-      id: "r1",
-      payload: {
-        kind: "available_activities",
-        total: 2,
-        activities: [
-          { activity: "act-1", agent: "x-agent", title: "title 1" },
-          { activity: "act-2", agent: "x-agent" },
+  it("SensitiveInfoOperationPayload roundtrip", () => {
+    const payload: SensitiveInfoOperationPayload = {
+      activity: "act-1",
+      requestId: "req-3",
+      operation: {
+        type: "collect",
+        items: [
+          {
+            key: "API_KEY",
+            displayText: "API Key",
+            hint: "enter your key",
+            siType: "secret",
+          },
         ],
       },
     };
-    const json = JSON.stringify(wire);
-    expect(json).toContain('"kind":"available_activities"');
-    expect(json).toContain('"total":2');
-    expect(json).toContain('"activities"');
 
-    const de: XacppEnvelope = JSON.parse(json);
-    expect(de.type).toBe("response");
-    if (de.type === "response" && de.payload.kind === "available_activities") {
-      expect(de.payload.total).toBe(2);
-      expect(de.payload.activities).toHaveLength(2);
-      expect(de.payload.activities[0].activity).toBe("act-1");
-      expect(de.payload.activities[1].activity).toBe("act-2");
-    }
+    const json = JSON.stringify(payload);
+    const de = JSON.parse(json) as SensitiveInfoOperationPayload;
+    expect(de.operation.type).toBe("collect");
+    expect(de.operation.items).toHaveLength(1);
   });
 
-  it("event activity_updates roundtrip", () => {
-    const event: XacppEvent = {
-      type: "activity_updates",
+  it("ActionRequestPayload as generic command arguments", () => {
+    const cmd = genericCommand("action_request", {
       activity: "act-1",
-      agent: "x-agent",
-      title: "updated title",
-    };
-    const json = JSON.stringify(event);
-    expect(json).toContain('"type":"activity_updates"');
-    expect(json).toContain('"activity":"act-1"');
+      requestId: "req-1",
+      toolName: "bash",
+      arguments: "{}",
+      actionId: "act-1",
+      description: "test",
+      alert: "info",
+      intent: "test",
+    } satisfies ActionRequestPayload);
 
-    const de: XacppEvent = JSON.parse(json);
-    expect(de.type).toBe("activity_updates");
-    if (de.type === "activity_updates") {
-      expect(de.activity).toBe("act-1");
-      expect(de.agent).toBe("x-agent");
+    const json = JSON.stringify(cmd);
+    expect(json).toContain('"name":"action_request"');
+    expect(json).not.toContain("responder");
+
+    const de = JSON.parse(json) as XacppCommand;
+    if ("generic" in de) {
+      expect(de.generic.name).toBe("action_request");
+      const args = de.generic.arguments as ActionRequestPayload;
+      expect(args.requestId).toBe("req-1");
     }
   });
 });

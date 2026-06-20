@@ -1,6 +1,6 @@
 {
   "name": "xacpp",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Agent Control Plane Protocol — TypeScript implementation",
   "keywords": [
     "xacpp",
