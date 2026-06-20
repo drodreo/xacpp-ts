@@ -1,22 +1,26 @@
 /**
- * 交互事件载荷（请求-响应模式）。
+ * Interaction command/response payloads.
  *
- * 协议层不持有通道，通过 requestId 进行请求-响应关联，
- * 响应方通过 transport 发送对应的 Response 消息。
+ * These types serve as serialization targets for:
+ * - Command `arguments` when `name` is "action_request", "question", or "sensitive_info_operation".
+ * - Response `data` when `name` is "action", "question", or "sensitive_info_operation".
+ *
+ * The `responder` channel from previous versions has been removed.
+ * Interaction requests are now Commands: the transport's request-response correlation
+ * handles matching responses back to the sender.
  */
 
 import type { AlertLevel } from "./payload";
 
-// ---- 工具调用授权 ----
+// ---- Tool Call Authorization ----
 
-/** 工具调用授权响应。 */
 export type ActionResponse =
   | { type: "approve" }
   | { type: "approve_always" }
   | { type: "reject"; reason: string };
 
-/** 工具调用授权请求事件载荷。 */
-export interface ActionRequestEvent {
+export interface ActionRequestPayload {
+  activity: string;
   requestId: string;
   toolName: string;
   arguments: string;
@@ -26,34 +30,30 @@ export interface ActionRequestEvent {
   intent: string;
 }
 
-// ---- 通知 ----
+// ---- Notification ----
 
-/** 用户通知事件载荷（单向推送，不阻塞等待回复）。 */
-export interface NotifyEvent {
+export interface NotifyPayload {
   requestId: string;
   message: string;
 }
 
-// ---- 提问 ----
+// ---- Question ----
 
-/** 用户提问响应。 */
 export type QuestionResponse =
   | { type: "answer"; content: string }
   | { type: "skip"; reason?: string };
 
-/** 用户提问事件载荷。 */
-export interface QuestionEvent {
+export interface QuestionPayload {
+  activity: string;
   requestId: string;
   question: string;
   options: string[];
 }
 
-// ---- 敏感信息 ----
+// ---- Sensitive Info ----
 
-/** 敏感信息类型。 */
 export type SensitiveInfoType = "secret" | "env_var";
 
-/** 敏感信息条目（脱敏展示）。 */
 export interface SensitiveInfoItem {
   id?: string;
   key: string;
@@ -62,25 +62,22 @@ export interface SensitiveInfoItem {
   siType: SensitiveInfoType;
 }
 
-/** 敏感信息操作类型。 */
 export type SensitiveInfoOperation =
   | { type: "collect"; items: SensitiveInfoItem[] }
   | { type: "delete"; items: SensitiveInfoItem[] };
 
-/** 单个敏感信息的操作结果。 */
 export type SensitiveInfoResult =
   | { type: "provided"; key: string; value: string }
   | { type: "collect_skipped"; key: string; reason?: string }
   | { type: "deleted"; id: string }
   | { type: "delete_rejected"; id: string; reason?: string };
 
-/** 敏感信息操作响应。 */
 export interface SensitiveInfoOperationResponse {
   results: SensitiveInfoResult[];
 }
 
-/** 敏感信息操作请求事件载荷。 */
-export interface SensitiveInfoOperationEvent {
+export interface SensitiveInfoOperationPayload {
+  activity: string;
   requestId: string;
   operation: SensitiveInfoOperation;
 }

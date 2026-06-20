@@ -1,6 +1,7 @@
 export type { XacppCommand } from "./commands";
+export { genericCommand, commandName } from "./commands";
 export * from "./events";
-export { XacppError } from "./message";
+export { XacppError, acknowledge, genericResponse, errorResponse } from "./message";
 export type { ActivityInfo, XacppRequest, XacppResponse, XacppEnvelope } from "./message";
 export type { Capabilities } from "./capability";
 export { XacppPeer, PeerState } from "./peer";
