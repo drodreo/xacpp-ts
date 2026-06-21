@@ -9,7 +9,7 @@
 
 import type { XacppTransport } from "./transport";
 import type { XacppCommand } from "./commands";
-import type { Capabilities } from "./capability";
+import type { EffectiveCapabilities } from "./capability";
 import type { XacppActivityEvent } from "./events";
 import type { XacppResponse } from "./message";
 
@@ -86,8 +86,8 @@ export interface NegotiateHandler {
   /**
    * Handle Negotiate request.
    *
-   * Inspects the remote peer's capabilities.
+   * Receives the computed effective capabilities after negotiation.
    * Throw XacppError to reject negotiation.
    */
-  onNegotiate(remoteCapabilities: Capabilities): Promise<void>;
+  onNegotiate(effective: EffectiveCapabilities): Promise<void>;
 }

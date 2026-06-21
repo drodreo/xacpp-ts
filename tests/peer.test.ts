@@ -18,7 +18,7 @@ import { genericCommand } from "../src/commands";
 import type { XacppActivityEvent } from "../src/events";
 import { newEvent, newActivityEvent } from "../src/events";
 import type { XacppSessionHandler, EstablishHandler, EstablishDecision, NegotiateHandler } from "../src/handler";
-import type { Capabilities } from "../src/capability";
+import type { Capabilities, EffectiveCapabilities } from "../src/capability";
 import { XacppPeer, PeerState } from "../src/peer";
 import type {
   ActionRequestPayload,
@@ -95,7 +95,7 @@ class ChallengeEstablishHandler implements EstablishHandler {
 
 /** Accepts all capabilities during negotiation. */
 class AcceptAllNegotiateHandler implements NegotiateHandler {
-  async onNegotiate(_remoteCapabilities: Capabilities): Promise<void> {
+  async onNegotiate(_effective: EffectiveCapabilities): Promise<void> {
     // Accept all
   }
 }
@@ -301,9 +301,9 @@ async function connectedPeers(): Promise<[XacppPeer, XacppPeer]> {
   const [a, b] = duplexPair();
   const capsAgent: Capabilities = {
     commands: [{ name: "new_activity" }, { name: "list_activity" }],
-    events: [{ name: "think" }, { name: "info" }],
+    produceEvents: [{ name: "think" }, { name: "info" }],
   };
-  const capsBot: Capabilities = { commands: [], events: [] };
+  const capsBot: Capabilities = { commands: [], produceEvents: [], acceptEvents: [] };
   const peerA = new XacppPeer(capsAgent, a, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler());
   const peerB = new XacppPeer(capsBot, b, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler());
   await peerA.connect();
@@ -321,7 +321,7 @@ async function negotiatedPeers(): Promise<[XacppPeer, XacppPeer]> {
 /** Creates a pair of negotiated Peers where side B uses InteractionSessionHandler. */
 async function interactionPeers(): Promise<[XacppPeer, XacppPeer]> {
   const [a, b] = duplexPair();
-  const caps: Capabilities = { commands: [], events: [] };
+  const caps: Capabilities = { commands: [], produceEvents: [], acceptEvents: [] };
   const peerA = new XacppPeer(caps, a, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler());
   const peerB = new XacppPeer(caps, b, new AcceptAllNegotiateHandler(), new InteractionEstablishHandler());
   await peerA.connect();
@@ -593,12 +593,12 @@ describe("Negotiate", () => {
       { name: "new_activity" },
       { name: "switch_activity" },
     ],
-    events: [
+    produceEvents: [
       { name: "content_delta" },
       { name: "activity_done" },
     ],
   };
-  const capsBot: Capabilities = { commands: [], events: [] };
+  const capsBot: Capabilities = { commands: [], produceEvents: [], acceptEvents: [] };
 
   it("full flow: negotiate exchanges capabilities and transitions to Negotiated", async () => {
     const [transportA, transportB] = duplexPair();
@@ -615,7 +615,7 @@ describe("Negotiate", () => {
     expect(peerA.state).toBe(PeerState.Negotiated);
     // A received B's capabilities (empty bot)
     expect(peerA.remoteCapabilities.commands).toEqual([]);
-    expect(peerA.remoteCapabilities.events).toEqual([]);
+    expect(peerA.remoteCapabilities.produceEvents).toEqual([]);
   });
 
   it("responder rejects negotiation", async () => {
@@ -623,7 +623,7 @@ describe("Negotiate", () => {
 
     /** Rejects negotiation by throwing. */
     const rejectNegotiateHandler: NegotiateHandler = {
-      async onNegotiate(_caps: Capabilities): Promise<void> {
+      async onNegotiate(_effective: EffectiveCapabilities): Promise<void> {
         throw XacppError.application("unsupported", "capability not supported");
       },
     };
@@ -643,7 +643,7 @@ describe("Negotiate", () => {
 
     /** Rejects negotiation by throwing. */
     const rejectNegotiateHandler: NegotiateHandler = {
-      async onNegotiate(_caps: Capabilities): Promise<void> {
+      async onNegotiate(_effective: EffectiveCapabilities): Promise<void> {
         throw XacppError.application("incompatible", "incompatible capabilities");
       },
     };
@@ -678,13 +678,13 @@ describe("Negotiate", () => {
         { name: "new_activity", version: "1.0" },
         { name: "cancel_activity" },
       ],
-      events: [
+      produceEvents: [
         { name: "content_delta" },
       ],
     };
     const capsBWithMore: Capabilities = {
       commands: [],
-      events: [
+      produceEvents: [
         { name: "action_request", version: "2.0" },
         { name: "question" },
       ],
@@ -697,14 +697,14 @@ describe("Negotiate", () => {
 
     // A's remote caps should be B's caps
     expect(peerA.remoteCapabilities.commands).toEqual([]);
-    expect(peerA.remoteCapabilities.events!.length).toBe(2);
-    expect(peerA.remoteCapabilities.events![0]).toEqual({ name: "action_request", version: "2.0" });
-    expect(peerA.remoteCapabilities.events![1]).toEqual({ name: "question" });
+    expect(peerA.remoteCapabilities.produceEvents!.length).toBe(2);
+    expect(peerA.remoteCapabilities.produceEvents![0]).toEqual({ name: "action_request", version: "2.0" });
+    expect(peerA.remoteCapabilities.produceEvents![1]).toEqual({ name: "question" });
 
     // After disconnect, remote caps cleared
     await peerA.disconnect();
     expect(peerA.remoteCapabilities.commands).toEqual([]);
-    expect(peerA.remoteCapabilities.events).toEqual([]);
+    expect(peerA.remoteCapabilities.produceEvents).toEqual([]);
   });
 });
 
@@ -833,7 +833,7 @@ describe("Multi session routing", () => {
   it("multi session routing isolation", async () => {
     // peerB uses SequencedEstablishHandler, each session gets an identified handler
     const [transportA, transportB] = duplexPair();
-    const emptyCaps: Capabilities = { commands: [], events: [] };
+    const emptyCaps: Capabilities = { commands: [], produceEvents: [], acceptEvents: [] };
     const peerA = new XacppPeer(emptyCaps, transportA, new AcceptAllNegotiateHandler(), new SequencedEstablishHandler());
     const peerB = new XacppPeer(emptyCaps, transportB, new AcceptAllNegotiateHandler(), new SequencedEstablishHandler());
     await peerA.connect();
@@ -879,7 +879,7 @@ describe("Multi session routing", () => {
 // ---- Challenge handshake tests ----
 
 describe("Challenge handshake", () => {
-  const emptyCaps: Capabilities = { commands: [], events: [] };
+  const emptyCaps: Capabilities = { commands: [], produceEvents: [], acceptEvents: [] };
 
   it("establish challenge flow", async () => {
     const [transportA, transportB] = duplexPair();
@@ -969,7 +969,7 @@ describe("Interaction commands", () => {
   it("action request → reject response", async () => {
     // Custom handler that rejects
     const [a, b] = duplexPair();
-    const caps: Capabilities = { commands: [], events: [] };
+    const caps: Capabilities = { commands: [], produceEvents: [], acceptEvents: [] };
 
     class RejectHandler implements XacppSessionHandler {
       async onCommand(command: XacppCommand): Promise<XacppResponse> {
