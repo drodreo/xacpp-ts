@@ -39,8 +39,9 @@ import type { XacppCommand } from "./commands";
 import type { XacppActivityEvent } from "./events";
 import type { XacppRequest, XacppResponse } from "./message";
 import { XacppError } from "./message";
-import type { Capabilities } from "./capability";
+import type { Capabilities, EffectiveCapabilities } from "./capability";
 import type { EstablishDecision, EstablishHandler, NegotiateHandler, XacppSessionHandler } from "./handler";
+import { computeEffectiveCapabilities } from "./capability";
 import { XacppSession } from "./session";
 
 /** Peer protocol state. */
@@ -64,7 +65,8 @@ export class XacppPeer {
   private establishHandler: EstablishHandler;
   private capabilities: Capabilities;
   private negotiateHandler: NegotiateHandler;
-  private _remoteCapabilities: Capabilities = { commands: [], events: [] };
+  private _remoteCapabilities: Capabilities = { commands: [], produceEvents: [], acceptEvents: [] };
+  private _emitEvents: string[] = [];
 
   constructor(capabilities: Capabilities, transport: XacppTransport, negotiateHandler: NegotiateHandler, establishHandler: EstablishHandler) {
     this.transport = transport;
@@ -83,6 +85,11 @@ export class XacppPeer {
     return this._remoteCapabilities;
   }
 
+  /** 我能发给对端的事件名列表（local.produceEvents ∩ remote.acceptEvents）。 */
+  get emitEvents(): string[] {
+    return this._emitEvents;
+  }
+
   // ---- Connection management ----
 
   /** Establish connection.
@@ -91,6 +98,7 @@ export class XacppPeer {
    * On success, state transitions to `Connected`; subsequent `establish` calls can create logical sessions.
    */
   async connect(): Promise<void> {
+    const self = this;
     const sessions = this.sessions;
     const capabilities = this.capabilities;
     const establishHandler = this.establishHandler;
@@ -104,7 +112,9 @@ export class XacppPeer {
           if (payload.kind === "command" && typeof payload.payload === "object" && "negotiate" in payload.payload) {
             // Negotiate request
             const remoteCaps = payload.payload.negotiate.capabilities;
-            await negotiateHandler.onNegotiate(remoteCaps);
+            const effective = computeEffectiveCapabilities(capabilities, remoteCaps);
+            self._emitEvents = effective.emitEvents;
+            await negotiateHandler.onNegotiate(effective);
             return { kind: "negotiated" as const, capabilities: capabilities };
           }
           if (payload.kind === "command" && typeof payload.payload === "object" && "establish" in payload.payload) {
@@ -163,7 +173,9 @@ export class XacppPeer {
 
     if (response.kind === "negotiated") {
       this._remoteCapabilities = response.capabilities;
-      await this.negotiateHandler.onNegotiate(this._remoteCapabilities);
+      const effective = computeEffectiveCapabilities(this.capabilities, response.capabilities);
+      this._emitEvents = effective.emitEvents;
+      await this.negotiateHandler.onNegotiate(effective);
       this._state = PeerState.Negotiated;
       return;
     }
@@ -245,7 +257,7 @@ export class XacppPeer {
     await this.transport.disconnect();
     this._state = PeerState.Disconnected;
     this.sessions.clear();
-    this._remoteCapabilities = { commands: [], events: [] };
+    this._remoteCapabilities = { commands: [], produceEvents: [], acceptEvents: [] };
   }
 
   // ---- Active sends (no session context) ----
