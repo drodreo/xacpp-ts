@@ -708,6 +708,129 @@ describe("Negotiate", () => {
   });
 });
 
+// ---- EffectiveCapabilities compute tests ----
+
+describe("EffectiveCapabilities", () => {
+  it("emit events intersection is computed correctly", async () => {
+    // capsA: produceEvents = [{name: "content_delta"}, {name: "think"}], acceptEvents = []
+    // capsB: produceEvents = [], acceptEvents = [{name: "content_delta"}, {name: "info"}]
+    // Expected: emitEvents = ["content_delta"] (intersection of A.produceEvents and B.acceptEvents)
+    const capsA: Capabilities = {
+      produceEvents: [{ name: "content_delta" }, { name: "think" }],
+      acceptEvents: [],
+    };
+    const capsB: Capabilities = {
+      produceEvents: [],
+      acceptEvents: [{ name: "content_delta" }, { name: "info" }],
+    };
+
+    // Create handler that captures effective
+    let capturedEffective: EffectiveCapabilities | null = null;
+    const captureHandler: NegotiateHandler = {
+      async onNegotiate(effective: EffectiveCapabilities): Promise<void> {
+        capturedEffective = effective;
+      },
+    };
+
+    const [transportA, transportB] = duplexPair();
+    const peerA = new XacppPeer(capsA, transportA, captureHandler, new AutoApproveEstablishHandler());
+    const peerB = new XacppPeer(capsB, transportB, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler());
+    await peerA.connect();
+    await peerB.connect();
+    await peerA.negotiate();
+
+    // Assert emitEvents = intersection of A.produceEvents and B.acceptEvents = ["content_delta"]
+    expect(capturedEffective).not.toBeNull();
+    expect(capturedEffective!.emitEvents).toEqual(["content_delta"]);
+  });
+
+  it("request event not in emitEvents returns error", async () => {
+    // capsA: produceEvents = [{name: "content_delta"}], acceptEvents = []
+    // capsB: produceEvents = [], acceptEvents = [{name: "content_delta"}, {name: "info"}]
+    // Expected: emitEvents = ["content_delta"], sending "think" should error
+    const capsA: Capabilities = {
+      produceEvents: [{ name: "content_delta" }],
+      acceptEvents: [],
+    };
+    const capsB: Capabilities = {
+      produceEvents: [],
+      acceptEvents: [{ name: "content_delta" }, { name: "info" }],
+    };
+
+    const [transportA, transportB] = duplexPair();
+    const peerA = new XacppPeer(capsA, transportA, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler());
+    const peerB = new XacppPeer(capsB, transportB, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler());
+    await peerA.connect();
+    await peerB.connect();
+    await peerA.negotiate();
+
+    // Establish session
+    await timeout(peerA.establish(undefined, new TestSessionHandler(), () => {}));
+
+    // Try to emit "think" event which is NOT in emitEvents (only "content_delta")
+    // peer.requestEvent validates against emitEvents; session.requestEvent bypasses peer
+    await expect(
+      timeout(peerA.requestEvent(null, newActivityEvent("test-act", newEvent("think", { content: "hi" })))),
+    ).rejects.toThrow();
+  });
+
+  it("remoteCommands full schema is preserved", async () => {
+    // capsA: commands = []
+    // capsB: commands = [{ name: "get_weather", description: "...", parameters: {...} }]
+    const capsA: Capabilities = {
+      commands: [],
+      produceEvents: [],
+      acceptEvents: [],
+    };
+    const capsB: Capabilities = {
+      commands: [
+        {
+          name: "get_weather",
+          description: "Get weather for a location",
+          parameters: {
+            type: "object",
+            properties: {
+              location: { type: "string", description: "City name" },
+            },
+            required: ["location"],
+          },
+        },
+      ],
+      produceEvents: [],
+      acceptEvents: [],
+    };
+
+    let capturedEffective: EffectiveCapabilities | null = null;
+    const captureHandler: NegotiateHandler = {
+      async onNegotiate(effective: EffectiveCapabilities): Promise<void> {
+        capturedEffective = effective;
+      },
+    };
+
+    const [transportA, transportB] = duplexPair();
+    const peerA = new XacppPeer(capsA, transportA, captureHandler, new AutoApproveEstablishHandler());
+    const peerB = new XacppPeer(capsB, transportB, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler());
+    await peerA.connect();
+    await peerB.connect();
+    await peerA.negotiate();
+
+    // Assert remoteCommands contains the full schema with description and parameters
+    expect(capturedEffective).not.toBeNull();
+    expect(capturedEffective!.remoteCommands.length).toBe(1);
+    expect(capturedEffective!.remoteCommands[0]).toEqual({
+      name: "get_weather",
+      description: "Get weather for a location",
+      parameters: {
+        type: "object",
+        properties: {
+          location: { type: "string", description: "City name" },
+        },
+        required: ["location"],
+      },
+    });
+  });
+});
+
 // ---- Disconnect scenario tests ----
 
 describe("Disconnect", () => {
