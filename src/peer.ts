@@ -269,6 +269,10 @@ export class XacppPeer {
 
   /** Send interactive event and wait for response (no session context). */
   async requestEvent(sessionId: string | null, event: XacppActivityEvent): Promise<XacppResponse> {
+    const eventName = event.event.name;
+    if (this._emitEvents.length > 0 && !this._emitEvents.includes(eventName)) {
+      throw XacppError.invalidState(`event '${eventName}' not in negotiated emitEvents capability`);
+    }
     return this.transport.send(sessionId, { kind: "event", payload: event });
   }
 }
