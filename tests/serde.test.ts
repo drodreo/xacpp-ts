@@ -175,7 +175,7 @@ describe("XacppEnvelope serialization", () => {
       session_id: "s1",
       payload: {
         kind: "event",
-        payload: { activity: "act-1", event: { name: "think", data: { content: "hi" } } },
+        payload: { activity: { id: "act-1" }, event: { name: "think", data: { content: "hi" } } },
       },
     };
 
