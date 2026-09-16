@@ -406,7 +406,7 @@ describe("Transport send", () => {
       expect(response.name).toBe("acknowledge");
     }
 
-    expect(received[0].activity).toBe("test-act");
+    expect(received[0].activity).toEqual({ id: "test-act" });
     expect(received[0].event.name).toBe("think");
     expect((received[0].event.data as { content: string }).content).toBe("hello");
   });

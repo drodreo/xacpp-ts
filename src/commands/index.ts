@@ -8,6 +8,7 @@
  */
 
 import type { Capabilities } from "../capability";
+import type { ActivityRef } from "../activity-ref";
 
 /** XACPP protocol command. */
 export type XacppCommand =
@@ -17,11 +18,18 @@ export type XacppCommand =
   | { establish: { credentials?: string } }
   /** Confirm establishment after challenge verification. */
   | "establish_confirm"
-  /** Generic business command. */
-  | { generic: { name: string; arguments: unknown } };
+  /**
+   * Generic business command.
+   * `activity` is optional; the protocol layer does not enforce it —
+   * validation belongs to the command implementation.
+   */
+  | { generic: { name: string; arguments: unknown; activity?: ActivityRef } };
 
 /** Convenience constructor for generic business commands. */
-export function genericCommand(name: string, args: unknown): XacppCommand {
+export function genericCommand(name: string, args: unknown, activity?: ActivityRef): XacppCommand {
+  if (activity !== undefined && activity !== null) {
+    return { generic: { name, arguments: args, activity } };
+  }
   return { generic: { name, arguments: args } };
 }
 

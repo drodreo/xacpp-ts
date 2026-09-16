@@ -1,5 +1,6 @@
 export type { XacppCommand } from "./commands";
 export { genericCommand, commandName } from "./commands";
+export type { ActivityRef } from "./activity-ref";
 export * from "./events";
 export { XacppError, acknowledge, genericResponse, errorResponse } from "./message";
 export type { ActivityInfo, XacppRequest, XacppResponse, XacppEnvelope } from "./message";
