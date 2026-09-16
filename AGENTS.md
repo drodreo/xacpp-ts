@@ -59,13 +59,13 @@ All wire messages are `XacppEnvelope` with `type` field routing:
 Request:  {"type":"request","id":"r1","session_id":null,"payload":{"kind":"command","payload":{"establish":{"credentials":null}}}}
 Request:  {"type":"request","id":"r2","session_id":"s1","payload":{"kind":"event","payload":{"type":"think","content":"hi"}}}
 Response: {"type":"response","id":"r1","payload":{"kind":"established","sessionId":"s1"}}
-Response: {"type":"response","id":"r2","session_id":"s1","payload":{"kind":"action","requestId":"req-1","type":"approve"}}
+Response: {"type":"response","id":"r2","session_id":"s1","payload":{"kind":"action","type":"approve"}}
 ```
 
 ### Naming convention
 
 - Envelope layer: `session_id` (snake_case)
-- Response payload: `sessionId`, `requestId` (camelCase) — mirrors Rust `rename_all_fields = "camelCase"`
+- Response payload: `sessionId` (camelCase) — mirrors Rust `rename_all_fields = "camelCase"`
 
 ### XacppCommand wire format
 

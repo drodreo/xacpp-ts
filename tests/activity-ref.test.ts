@@ -41,8 +41,8 @@ describe("Generic command activity serialization", () => {
 
     const json = JSON.stringify(cmd);
     const de = JSON.parse(json) as XacppCommand;
-    expect("generic" in de).toBe(true);
-    if ("generic" in de) {
+    expect(typeof de === "object" && "generic" in de).toBe(true);
+    if (typeof de === "object" && "generic" in de) {
       expect(de.generic.name).toBe("report_to_user");
       expect(de.generic.arguments).toEqual({ content: [] });
       expect(de.generic.activity).toEqual({ id: "act-1" });

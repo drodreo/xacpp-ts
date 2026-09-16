@@ -95,7 +95,7 @@ const server = new SocketTransport(acceptedSocket);
 | `EstablishHandler` | 处理 Establish 握手请求 |
 | `XacppCommand` | 协议命令（`establish`、`new_activity` 等） |
 | `ActivityRef` | 命令/事件信封共用的活动标识引用（`{id}`） |
-| `XacppEvent` | 协议事件（think、action_request、question 等） |
+| `XacppEvent` | 协议事件（think、content_delta、pair_complete 等） |
 | `XacppRequest` | 请求载荷（`command` 或 `event`） |
 | `XacppResponse` | 响应载荷（`established`、`acknowledge`、`action` 等） |
 | `XacppError` | 错误类，含机器可读错误码 |
@@ -127,7 +127,7 @@ Generic 命令携带可选的 `activity` 引用（`activity: {"id": string}`）�
 
 ## 命令声明约定
 
-命令声明 schema 可携带 `dispatcher` 字段，枚举值 `"system" | "model"`，缺省视为 `"system"`：`system` 表示系统路径接入（不进模型工具面），`model` 表示模型直调（进工具列表）。声明 schema 为透传 JSON——协议库不强制类型。
+命令声明 schema 可携带 `dispatcher` 字段，枚举值 `"bridge" | "tool"`，缺省视为 `"bridge"`：`bridge` 表示直连事件桥系统路径，`tool` 表示注入接收方模型工具面（同名 replace，对端声明优先）。声明 schema 为透传 JSON——协议库不强制类型。
 
 ## 许可证
 

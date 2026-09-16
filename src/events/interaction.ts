@@ -20,8 +20,6 @@ export type ActionResponse =
   | { type: "reject"; reason: string };
 
 export interface ActionRequestPayload {
-  activity: string;
-  requestId: string;
   toolName: string;
   arguments: string;
   actionId: string;
@@ -33,7 +31,6 @@ export interface ActionRequestPayload {
 // ---- Notification ----
 
 export interface NotifyPayload {
-  requestId: string;
   message: string;
 }
 
@@ -44,8 +41,6 @@ export type QuestionResponse =
   | { type: "skip"; reason?: string };
 
 export interface QuestionPayload {
-  activity: string;
-  requestId: string;
   question: string;
   options: string[];
 }
@@ -77,7 +72,5 @@ export interface SensitiveInfoOperationResponse {
 }
 
 export interface SensitiveInfoOperationPayload {
-  activity: string;
-  requestId: string;
   operation: SensitiveInfoOperation;
 }

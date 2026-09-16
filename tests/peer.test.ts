@@ -107,8 +107,7 @@ class InteractionSessionHandler implements XacppSessionHandler {
       const { name, arguments: args } = command.generic;
 
       if (name === "action_request") {
-        const payload = args as ActionRequestPayload;
-        return genericResponse("action", { requestId: payload.requestId, type: "approve" } satisfies ActionResponse);
+        return genericResponse("action", { type: "approve" } satisfies ActionResponse);
       }
 
       if (name === "question") {
@@ -418,9 +417,8 @@ describe("Transport send", () => {
       if (payload.kind === "command") {
         const cmd = payload.payload;
         if (typeof cmd === "object" && "generic" in cmd && cmd.generic.name === "action_request") {
-          const args = cmd.generic.arguments as ActionRequestPayload;
           return Promise.resolve(
-            genericResponse("action", { requestId: args.requestId, type: "approve" }),
+            genericResponse("action", { type: "approve" } satisfies ActionResponse),
           );
         }
       }
@@ -433,16 +431,18 @@ describe("Transport send", () => {
     const response = await timeout(
       transportA.send("s1", {
         kind: "command",
-        payload: genericCommand("action_request", {
-          activity: "act-1",
-          requestId: "req-1",
-          toolName: "bash",
-          arguments: "{}",
-          actionId: "act-1",
-          description: "test",
-          alert: "info",
-          intent: "test",
-        } satisfies ActionRequestPayload),
+        payload: genericCommand(
+          "action_request",
+          {
+            toolName: "bash",
+            arguments: "{}",
+            actionId: "act-1",
+            description: "test",
+            alert: "info",
+            intent: "test",
+          } satisfies ActionRequestPayload,
+          { id: "act-1" },
+        ),
       }),
     );
 
@@ -1068,16 +1068,18 @@ describe("Interaction commands", () => {
 
     const response = await timeout(
       session.requestCommand(
-        genericCommand("action_request", {
-          activity: "act-1",
-          requestId: "req-1",
-          toolName: "bash",
-          arguments: '{"command":"ls"}',
-          actionId: "act-1",
-          description: "list files",
-          alert: "warn",
-          intent: "list files",
-        } satisfies ActionRequestPayload),
+        genericCommand(
+          "action_request",
+          {
+            toolName: "bash",
+            arguments: '{"command":"ls"}',
+            actionId: "act-1",
+            description: "list files",
+            alert: "warn",
+            intent: "list files",
+          } satisfies ActionRequestPayload,
+          { id: "act-1" },
+        ),
       ),
     );
 
@@ -1097,8 +1099,7 @@ describe("Interaction commands", () => {
     class RejectHandler implements XacppSessionHandler {
       async onCommand(command: XacppCommand): Promise<XacppResponse> {
         if (typeof command === "object" && "generic" in command && command.generic.name === "action_request") {
-          const args = command.generic.arguments as ActionRequestPayload;
-          return genericResponse("action", { requestId: args.requestId, type: "reject", reason: "forbidden" });
+          return genericResponse("action", { type: "reject", reason: "forbidden" } satisfies ActionResponse);
         }
         return acknowledge();
       }
@@ -1126,16 +1127,18 @@ describe("Interaction commands", () => {
 
     const response = await timeout(
       session.requestCommand(
-        genericCommand("action_request", {
-          activity: "act-1",
-          requestId: "req-2",
-          toolName: "rm",
-          arguments: '{"command":"rm -rf /"}',
-          actionId: "act-2",
-          description: "dangerous",
-          alert: "critical",
-          intent: "delete everything",
-        } satisfies ActionRequestPayload),
+        genericCommand(
+          "action_request",
+          {
+            toolName: "rm",
+            arguments: '{"command":"rm -rf /"}',
+            actionId: "act-2",
+            description: "dangerous",
+            alert: "critical",
+            intent: "delete everything",
+          } satisfies ActionRequestPayload,
+          { id: "act-1" },
+        ),
       ),
     );
 
@@ -1155,12 +1158,14 @@ describe("Interaction commands", () => {
 
     const response = await timeout(
       session.requestCommand(
-        genericCommand("question", {
-          activity: "act-1",
-          requestId: "req-q1",
-          question: "continue?",
-          options: ["yes", "no"],
-        } satisfies QuestionPayload),
+        genericCommand(
+          "question",
+          {
+            question: "continue?",
+            options: ["yes", "no"],
+          } satisfies QuestionPayload,
+          { id: "act-1" },
+        ),
       ),
     );
 
@@ -1183,17 +1188,19 @@ describe("Interaction commands", () => {
 
     const response = await timeout(
       session.requestCommand(
-        genericCommand("sensitive_info_operation", {
-          activity: "act-1",
-          requestId: "req-si1",
-          operation: {
-            type: "collect",
-            items: [
-              { key: "API_KEY", displayText: "API Key", hint: "enter key", siType: "secret" },
-              { key: "DB_PASSWORD", displayText: "DB Password", hint: "enter password", siType: "secret" },
-            ],
-          },
-        } satisfies SensitiveInfoOperationPayload),
+        genericCommand(
+          "sensitive_info_operation",
+          {
+            operation: {
+              type: "collect",
+              items: [
+                { key: "API_KEY", displayText: "API Key", hint: "enter key", siType: "secret" },
+                { key: "DB_PASSWORD", displayText: "DB Password", hint: "enter password", siType: "secret" },
+              ],
+            },
+          } satisfies SensitiveInfoOperationPayload,
+          { id: "act-1" },
+        ),
       ),
     );
 

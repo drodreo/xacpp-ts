@@ -95,7 +95,7 @@ const server = new SocketTransport(acceptedSocket);
 | `EstablishHandler` | Handles Establish handshake requests |
 | `XacppCommand` | Protocol commands (`establish`, `new_activity`, etc.) |
 | `ActivityRef` | Activity identifier reference shared by command and event envelopes (`{id}`) |
-| `XacppEvent` | Protocol events (think, action_request, question, etc.) |
+| `XacppEvent` | Protocol events (think, content_delta, pair_complete, etc.) |
 | `XacppRequest` | Request payload (`command` or `event`) |
 | `XacppResponse` | Response payload (`established`, `acknowledge`, `action`, etc.) |
 | `XacppError` | Error class with machine-readable codes |
@@ -127,7 +127,7 @@ The activity event envelope carries a structured `activity: {"id": string}` refe
 
 ## Command Declarations
 
-Command declaration schemas may carry a `dispatcher` field with enum value `"system" | "model"`, defaulting to `"system"`: `system` means the command is wired through the system path (not exposed to the model tool surface); `model` means direct model invocation (included in the tool list). Declaration schemas are pass-through JSON — the protocol library does not enforce types.
+Command declaration schemas may carry a `dispatcher` field with enum value `"bridge" | "tool"`, defaulting to `"bridge"`: `bridge` means the command goes through the event bridge system path; `tool` means injection into the receiving side's model tool surface (same-name replace, peer declarations take precedence). Declaration schemas are pass-through JSON — the protocol library does not enforce types.
 
 ## License
 
