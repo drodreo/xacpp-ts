@@ -1,4 +1,14 @@
 export type { XacppCommand } from "./commands";
+export type {
+  NewActivityPayload,
+  LastActivityPayload,
+  SwitchActivityPayload,
+  ListActivityPayload,
+  InvokeActivityPayload,
+  CancelActivityPayload,
+  CompactActivityPayload,
+  AvailableActivitiesResponse,
+} from "./commands";
 export { genericCommand, commandName } from "./commands";
 export type { ActivityRef } from "./activity-ref";
 export * from "./events";

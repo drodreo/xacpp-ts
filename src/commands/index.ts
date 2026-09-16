@@ -10,6 +10,8 @@
 import type { Capabilities } from "../capability";
 import type { ActivityRef } from "../activity-ref";
 
+export * from "./lifecycle";
+
 /** XACPP protocol command. */
 export type XacppCommand =
   /** Negotiate capabilities before session establishment. */

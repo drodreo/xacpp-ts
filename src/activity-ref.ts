@@ -2,7 +2,7 @@
  * Activity reference shared by command and event envelopes.
  */
 
-/** Identifies the activity a command/event belongs to. */
+/** Identifies the source activity a command/event originates from. */
 export interface ActivityRef {
   id: string;
 }
