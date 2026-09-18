@@ -93,7 +93,7 @@ Must stay in sync with xacpp-rs test suite.
 
 ## Conventions
 
-- All comments in English
+- All comments and commit messages in English
 - Keep in sync with xacpp-rs: when adding/removing a command, response variant, or envelope field, update both projects
 - `XacppCommand` is a union type (not a string enum) — Establish carries `credentials`
 - Transport implementations must handle envelope `session_id` field
