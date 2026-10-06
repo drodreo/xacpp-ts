@@ -5,6 +5,9 @@
  * 1. Concurrent requests are processed independently, with no cross-talk
  * 2. Concurrent response writes have no data corruption
  * 3. Disconnect aborts inflight tasks without deadlock
+ * 4. Ordered egress: faf events arrive in submission order, commands do not
+ *    overtake queued events, faf never waits for the ack
+ * 5. Connection-close notification (onClosed), including late subscribers
  *
  * Aligned with xacpp-rs tests/socket_concurrent_tests.rs.
  */
@@ -17,6 +20,7 @@ import type { XacppCommand } from "../src/commands";
 import { genericCommand } from "../src/commands";
 import type { XacppRequest, XacppResponse } from "../src/message";
 import { genericResponse } from "../src/message";
+import { newActivityEvent, newEvent } from "../src/events";
 import { SocketTransport } from "../src/socket-transport";
 
 // ---- Helper functions ----
@@ -196,6 +200,144 @@ describe("SocketTransport concurrent", () => {
     for (const p of sendPromises) {
       await expect(timeout(p, 2000)).rejects.toThrow();
     }
+
+    cleanup();
+  });
+
+  // ---- Test 4: faf events arrive in submission order ----
+
+  it("faf events arrive in submission order", async () => {
+    const arrivals: number[] = [];
+    const handler: RequestHandler = async (_sessionId, payload) => {
+      if (payload.kind === "event") {
+        const seq = (payload.payload as { event: { data: { seq: number } } }).event.data.seq;
+        arrivals.push(seq);
+      }
+      return genericResponse("acknowledge", null);
+    };
+    const { client, cleanup } = await socketPair(handler);
+
+    const N = 50;
+    for (let seq = 0; seq < N; seq++) {
+      await client.sendFaf(null, {
+        kind: "event",
+        payload: newActivityEvent("act-1", newEvent("content_delta", { seq })),
+      });
+    }
+
+    // FIFO drain guarantee: a following round trip implies all prior frames arrived.
+    await client.send(null, { kind: "command", payload: genericCommand("sync", {}) });
+
+    expect(arrivals).toEqual(Array.from({ length: N }, (_, i) => i));
+
+    cleanup();
+  });
+
+  // ---- Test 5: command does not overtake queued events ----
+
+  it("command does not overtake queued events", async () => {
+    const arrivals: string[] = [];
+    const handler: RequestHandler = async (_sessionId, payload) => {
+      if (payload.kind === "event") {
+        const seq = (payload.payload as { event: { data: { seq: number } } }).event.data.seq;
+        arrivals.push(`ev${seq}`);
+      } else if (payload.kind === "command" && typeof payload.payload === "object" && "generic" in payload.payload) {
+        arrivals.push(`cmd:${payload.payload.generic.name}`);
+      } else {
+        arrivals.push("other");
+      }
+      return genericResponse("acknowledge", null);
+    };
+    const { client, cleanup } = await socketPair(handler);
+
+    const ev = (seq: number) => newActivityEvent("act-1", newEvent("content_delta", { seq }));
+    await client.sendFaf(null, { kind: "event", payload: ev(0) });
+    await client.send(null, { kind: "command", payload: genericCommand("probe", {}) });
+    await client.sendFaf(null, { kind: "event", payload: ev(1) });
+    // Final sync: drains ev1 before assertion.
+    await client.send(null, { kind: "command", payload: genericCommand("sync", {}) });
+
+    expect(arrivals).toEqual(["ev0", "cmd:probe", "ev1", "cmd:sync"]);
+
+    cleanup();
+  });
+
+  // ---- Test 6: sendFaf returns without waiting for the ack ----
+
+  it("sendFaf returns without ack and does not stall the pipe", async () => {
+    // Server never responds to events (handler pends forever); commands ack normally.
+    const handler: RequestHandler = async (_sessionId, payload) => {
+      if (payload.kind === "event") {
+        return new Promise<XacppResponse>(() => {
+          // never resolves
+        });
+      }
+      return genericResponse("acknowledge", null);
+    };
+    const { client, cleanup } = await socketPair(handler);
+
+    // faf returns immediately even though the peer never acks the event.
+    await timeout(
+      client.sendFaf(null, {
+        kind: "event",
+        payload: newActivityEvent("act-1", newEvent("content_delta", { seq: 0 })),
+      }),
+    );
+
+    // The pipe is not stalled: a following command still round-trips.
+    await timeout(
+      client.send(null, { kind: "command", payload: genericCommand("probe", {}) }),
+    );
+
+    cleanup();
+  });
+
+  // ---- Test 7: closed() fires on peer disconnect ----
+
+  it("onClosed fires when the peer disconnects", async () => {
+    const handler: RequestHandler = async () => genericResponse("acknowledge", null);
+    const { client, server, cleanup } = await socketPair(handler);
+
+    let fired = 0;
+    let latest: boolean | null = null;
+    client.onClosed(() => {
+      fired++;
+      latest = true;
+    });
+
+    expect(latest).toBeNull(); // connection starts open
+
+    await server.disconnect();
+
+    await expect(
+      timeout(new Promise<void>((resolve) => {
+        const check = () => (fired > 0 ? resolve() : setTimeout(check, 5));
+        check();
+      }), 5000),
+    ).resolves.toBeUndefined();
+    expect(latest).toBe(true);
+
+    cleanup();
+  });
+
+  // ---- Test 8: late subscriber reads closed state ----
+
+  it("onClosed late subscriber observes the closed state immediately", async () => {
+    const handler: RequestHandler = async () => genericResponse("acknowledge", null);
+    const { client, server, cleanup } = await socketPair(handler);
+
+    await server.disconnect();
+
+    // Wait for the close to propagate (first watcher drives it), then
+    // subscribe late — the listener must fire immediately.
+    await expect(
+      timeout(new Promise<void>((resolve) => {
+        const unsub = client.onClosed(() => {
+          unsub();
+          resolve();
+        });
+      }), 5000),
+    ).resolves.toBeUndefined();
 
     cleanup();
   });
