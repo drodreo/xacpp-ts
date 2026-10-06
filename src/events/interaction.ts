@@ -26,6 +26,16 @@ export interface ActionRequestPayload {
   description: string;
   alert: AlertLevel;
   intent: string;
+  /**
+   * Activity origin chain titles (source first).
+   *
+   * - Empty: the request was initiated by the consuming activity itself;
+   * - Non-empty: forwarded from a sub-activity — index 0 is the deepest
+   *   originating activity title, ascending toward the consuming activity,
+   *   with the last entry being the direct child of the consumer. Built by
+   *   the host's ActivityManager interaction forwarder.
+   */
+  origin: string[];
 }
 
 // ---- Notification ----
@@ -43,6 +53,16 @@ export type QuestionResponse =
 export interface QuestionPayload {
   question: string;
   options: string[];
+  /**
+   * Activity origin chain titles (source first).
+   *
+   * - Empty: the request was initiated by the consuming activity itself;
+   * - Non-empty: forwarded from a sub-activity — index 0 is the deepest
+   *   originating activity title, ascending toward the consuming activity,
+   *   with the last entry being the direct child of the consumer. Built by
+   *   the host's ActivityManager interaction forwarder.
+   */
+  origin: string[];
 }
 
 // ---- Sensitive Info ----
@@ -73,4 +93,14 @@ export interface SensitiveInfoOperationResponse {
 
 export interface SensitiveInfoOperationPayload {
   operation: SensitiveInfoOperation;
+  /**
+   * Activity origin chain titles (source first).
+   *
+   * - Empty: the request was initiated by the consuming activity itself;
+   * - Non-empty: forwarded from a sub-activity — index 0 is the deepest
+   *   originating activity title, ascending toward the consuming activity,
+   *   with the last entry being the direct child of the consumer. Built by
+   *   the host's ActivityManager interaction forwarder.
+   */
+  origin: string[];
 }

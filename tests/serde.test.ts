@@ -510,6 +510,7 @@ describe("Interaction payload serialization", () => {
       description: "test",
       alert: "info",
       intent: "test",
+      origin: ["sub-task-a"],
     };
 
     const json = JSON.stringify(payload);
@@ -517,22 +518,27 @@ describe("Interaction payload serialization", () => {
     expect(json).not.toContain("responder");
     expect(json).not.toContain("requestId");
     expect(json).toContain('"toolName":"bash"');
+    expect(json).toContain('"origin":["sub-task-a"]');
 
     const de = JSON.parse(json) as ActionRequestPayload;
     expect(de.toolName).toBe("bash");
+    expect(de.origin).toEqual(["sub-task-a"]);
   });
 
   it("QuestionPayload roundtrip", () => {
     const payload: QuestionPayload = {
       question: "continue?",
       options: ["yes", "no"],
+      origin: ["sub-task-a"],
     };
 
     const json = JSON.stringify(payload);
     expect(json).not.toContain("requestId");
+    expect(json).toContain('"origin":["sub-task-a"]');
     const de = JSON.parse(json) as QuestionPayload;
     expect(de.question).toBe("continue?");
     expect(de.options).toEqual(["yes", "no"]);
+    expect(de.origin).toEqual(["sub-task-a"]);
   });
 
   it("SensitiveInfoOperationPayload roundtrip", () => {
@@ -548,12 +554,37 @@ describe("Interaction payload serialization", () => {
           },
         ],
       },
+      origin: ["sub-task-a"],
     };
 
     const json = JSON.stringify(payload);
+    expect(json).toContain('"origin":["sub-task-a"]');
     const de = JSON.parse(json) as SensitiveInfoOperationPayload;
     expect(de.operation.type).toBe("collect");
     expect(de.operation.items).toHaveLength(1);
+    expect(de.origin).toEqual(["sub-task-a"]);
+  });
+
+  it("legacy payloads without origin deserialize with undefined origin", () => {
+    // Pre-0.8.4 wire format carries no origin field (= consuming activity
+    // initiated the request itself). TS has no serde defaults, so consumers
+    // treat missing origin as empty chain.
+    const de = JSON.parse(
+      '{"question":"continue?","options":["yes"]}',
+    ) as QuestionPayload;
+    expect(de.origin).toBeUndefined();
+  });
+
+  it("multi-hop origin chain roundtrip (source first)", () => {
+    const payload: QuestionPayload = {
+      question: "continue?",
+      options: ["yes"],
+      origin: ["grandchild", "direct-child"],
+    };
+    const json = JSON.stringify(payload);
+    expect(json).toContain('"origin":["grandchild","direct-child"]');
+    const de = JSON.parse(json) as QuestionPayload;
+    expect(de.origin).toEqual(["grandchild", "direct-child"]);
   });
 
   it("ActionRequestPayload as generic command arguments", () => {
@@ -566,6 +597,7 @@ describe("Interaction payload serialization", () => {
         description: "test",
         alert: "info",
         intent: "test",
+        origin: [],
       } satisfies ActionRequestPayload,
       { id: "act-1" },
     );
