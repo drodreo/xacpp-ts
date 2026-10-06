@@ -275,4 +275,17 @@ export class XacppPeer {
     }
     return this.transport.send(sessionId, { kind: "event", payload: event });
   }
+
+  /**
+   * Send event fire-and-forget (no session context): returns as soon as the
+   * frame is queued for writing, never waits for the ack.
+   */
+  async sendEvent(sessionId: string | null, event: XacppActivityEvent): Promise<void> {
+    // Validate event name against the negotiated emitEvents capability
+    const eventName = event.event.name;
+    if (this._emitEvents.length > 0 && !this._emitEvents.includes(eventName)) {
+      throw XacppError.invalidState(`event '${eventName}' not in negotiated emitEvents capability`);
+    }
+    return this.transport.sendFaf(sessionId, { kind: "event", payload: event });
+  }
 }

@@ -232,6 +232,28 @@ class DirectTransport implements XacppTransport {
     });
   }
 
+  async sendFaf(sessionId: string | null, payload: XacppRequest): Promise<void> {
+    if (!this._connected) throw XacppError.notConnected();
+
+    const id = `r${this.nextId++}`;
+
+    // Fire-and-forget: no pending slot, the peer's ack is silently dropped.
+    const envelope = {
+      type: "request" as const,
+      id,
+      ...(sessionId != null ? { session_id: sessionId } : {}),
+      payload,
+    };
+    const json = JSON.stringify(envelope);
+    const peer = this.peer!;
+    queueMicrotask(() => void peer.deliver(json));
+  }
+
+  onClosed(_listener: () => void): () => void {
+    // Test double: no close notification simulation needed yet.
+    return () => {};
+  }
+
   onRequest(handler: RequestHandler): void {
     if (this._connected) throw XacppError.alreadyConnected();
     this.requestHandler = handler;

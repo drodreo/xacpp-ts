@@ -41,13 +41,14 @@ Three-layer design, mirroring xacpp-rs:
 
 | File | Responsibility |
 |------|---------------|
-| `src/transport.ts` | `XacppTransport` interface + `RequestHandler` type |
+| `src/transport.ts` | `XacppTransport` interface (`send` / `sendFaf` / `onRequest` / `onClosed`) + `RequestHandler` type |
 | `src/handler.ts` | `XacppSessionHandler` + `EstablishHandler` interfaces |
 | `src/session.ts` | `XacppSession` class |
 | `src/peer.ts` | `XacppPeer` class + `PeerState` enum |
 | `src/message.ts` | `XacppError`, `XacppRequest`, `XacppResponse`, `XacppEnvelope` |
 | `src/commands/index.ts` | `XacppCommand` union type |
 | `src/events/` | Event type definitions |
+| `src/egress.ts` | Ordered egress (single FIFO drain loop), `ClosedSignal` close broadcast, pending slot types |
 | `src/stdio-transport.ts` | Stdio transport (stdin/stdout JSONL) |
 | `src/socket-transport.ts` | TCP transport (`net.Socket`, spawn-per-request concurrency) |
 
@@ -79,15 +80,19 @@ Uses externally tagged serde (mirrors Rust):
 ```bash
 pnpm build     # rslib → dist/esm/ + dist/cjs/
 pnpm test      # vitest run
+pnpm bench:egress   # egress throughput benchmark (examples/egress-bench.mts, imports dist bundle; XACPP_BENCH_N overrides scale)
 ```
 
 Build tool is **rslib** (not tsc). Do not add `tsc` build steps.
 
 ## Testing
 
-- `tests/peer.test.ts` — Transport + Peer + Session e2e (16 tests)
-- `tests/serde.test.ts` — Serialization round-trip (15 tests)
-- `tests/socket-concurrent.test.ts` — SocketTransport concurrency (3 tests)
+- `tests/activity-ref.test.ts` — ActivityRef parsing (4 tests)
+- `tests/capability.test.ts` — Capability negotiation (6 tests)
+- `tests/peer.test.ts` — Transport + Peer + Session e2e (31 tests)
+- `tests/serde.test.ts` — Serialization round-trip (39 tests)
+- `tests/socket-concurrent.test.ts` — SocketTransport concurrency + ordered egress + closed notification (8 tests)
+- `tests/egress-wire.test.ts` — Wire-level egress order/throughput/stability, raw TCP peer (3 tests)
 
 Must stay in sync with xacpp-rs test suite.
 
