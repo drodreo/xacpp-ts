@@ -87,12 +87,12 @@ Build tool is **rslib** (not tsc). Do not add `tsc` build steps.
 
 ## Testing
 
-- `tests/activity-ref.test.ts` — ActivityRef parsing (4 tests)
-- `tests/capability.test.ts` — Capability negotiation (6 tests)
-- `tests/peer.test.ts` — Transport + Peer + Session e2e (31 tests)
-- `tests/serde.test.ts` — Serialization round-trip (39 tests)
-- `tests/socket-concurrent.test.ts` — SocketTransport concurrency + ordered egress + closed notification (8 tests)
-- `tests/egress-wire.test.ts` — Wire-level egress order/throughput/stability, raw TCP peer (3 tests)
+- `tests/activity-ref.test.ts` — ActivityRef parsing
+- `tests/capability.test.ts` — Capability negotiation
+- `tests/peer.test.ts` — Transport + Peer + Session e2e
+- `tests/serde.test.ts` — Serialization round-trip
+- `tests/socket-concurrent.test.ts` — SocketTransport concurrency + ordered egress + closed notification
+- `tests/egress-wire.test.ts` — Wire-level egress order/throughput/stability, raw TCP peer
 
 Must stay in sync with xacpp-rs test suite.
 
