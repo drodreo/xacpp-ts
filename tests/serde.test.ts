@@ -22,9 +22,11 @@ import type { ActivityInfo } from "../src/message";
 import { acknowledge, genericResponse, errorResponse } from "../src/message";
 import type { XacppCommand } from "../src/commands";
 import type {
+  ArchiveActivityPayload,
   AvailableActivitiesResponse,
   CancelActivityPayload,
   CompactActivityPayload,
+  DeleteActivityPayload,
   InvokeActivityPayload,
   LastActivityPayload,
   ListActivityPayload,
@@ -713,6 +715,12 @@ describe("Lifecycle command payload serialization", () => {
 
     const compactActivity: CompactActivityPayload = { activity: "act-1" };
     expect(JSON.parse(JSON.stringify(compactActivity))).toEqual({ activity: "act-1" });
+
+    const archiveActivity: ArchiveActivityPayload = { activity: "act-1" };
+    expect(JSON.parse(JSON.stringify(archiveActivity))).toEqual({ activity: "act-1" });
+
+    const deleteActivity: DeleteActivityPayload = { activity: "act-1" };
+    expect(JSON.parse(JSON.stringify(deleteActivity))).toEqual({ activity: "act-1" });
   });
 
   it("absent optional fields do not appear on the wire", () => {
@@ -739,6 +747,25 @@ describe("Lifecycle command payload serialization", () => {
     expect(de.activities[0]).toEqual({ activity: "act-1", agent: "agent-a", title: "first" });
     // title absent → field not on the wire
     expect(JSON.stringify(de.activities[1])).toBe('{"activity":"act-2","agent":"agent-a"}');
+  });
+
+  it("ActivityInfo optional info fields roundtrip", () => {
+    const info: ActivityInfo = {
+      activity: "act-1",
+      agent: "agent-a",
+      title: "first",
+      description: "long-term memory work",
+      updatedAt: "2026-10-11T03:00:00Z",
+      workingDir: "$AGENT_HOME/projects/demo",
+    };
+
+    const de: ActivityInfo = JSON.parse(JSON.stringify(info));
+    expect(de).toEqual(info);
+    expect(de.updatedAt).toBe("2026-10-11T03:00:00Z");
+
+    // absent optional fields → not on the wire
+    const bare: ActivityInfo = { activity: "act-2", agent: "agent-a" };
+    expect(JSON.stringify(bare)).toBe('{"activity":"act-2","agent":"agent-a"}');
   });
 
   it("activity_ready / acknowledge response constructors", () => {

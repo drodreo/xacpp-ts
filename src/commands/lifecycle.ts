@@ -1,8 +1,9 @@
 /**
  * Lifecycle command payloads.
  *
- * The seven lifecycle commands (new_activity / last_activity / switch_activity /
- * list_activity / invoke_activity / cancel_activity / compact_activity) are
+ * The nine lifecycle commands (new_activity / last_activity / switch_activity /
+ * list_activity / invoke_activity / cancel_activity / compact_activity /
+ * archive_activity / delete_activity) are
  * business commands sent as Generic commands (`genericCommand(name, arguments)`).
  * These types are the serialization targets for their `arguments` and for
  * response `data`.
@@ -14,7 +15,7 @@
  *   - `activity_ready` → data is `ActivityInfo` (resp-only; no event-side form)
  *   - `activity_not_found` → data is an empty object
  *   - `available_activities` → data is `AvailableActivitiesResponse`
- *   - invoke / cancel / compact → `acknowledge` (see `message.ts`)
+ *   - invoke / cancel / compact / archive / delete → `acknowledge` (see `message.ts`)
  */
 
 import type { ContentPart } from "../events/content";
@@ -56,6 +57,16 @@ export interface CancelActivityPayload {
 
 /** compact_activity: compact an activity's context. */
 export interface CompactActivityPayload {
+  activity: string;
+}
+
+/** archive_activity: archive an activity. */
+export interface ArchiveActivityPayload {
+  activity: string;
+}
+
+/** delete_activity: permanently delete an activity. */
+export interface DeleteActivityPayload {
   activity: string;
 }
 

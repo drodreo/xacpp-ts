@@ -60,6 +60,12 @@ export interface ActivityInfo {
   activity: string;
   agent: string;
   title?: string;
+  /** Human-readable description. */
+  description?: string;
+  /** Last update time, RFC 3339 string. */
+  updatedAt?: string;
+  /** Activity working directory (may use the `$AGENT_HOME` placeholder). */
+  workingDir?: string;
 }
 
 // ---- Payload types ----
