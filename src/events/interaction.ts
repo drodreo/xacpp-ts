@@ -36,6 +36,13 @@ export interface ActionRequestPayload {
    *   the host's ActivityManager interaction forwarder.
    */
   origin: string[];
+  /**
+   * Unique identifier for matching this request with its response on the
+   * wire (engine-level correlation identity, carried through unchanged).
+   *
+   * COMPAT: 旧 serve 无 requestId 的兼容路径（缺省为 undefined，等价空串），后续版本解除。
+   */
+  requestId?: string;
 }
 
 // ---- Notification ----
@@ -63,6 +70,13 @@ export interface QuestionPayload {
    *   the host's ActivityManager interaction forwarder.
    */
   origin: string[];
+  /**
+   * Unique identifier for matching this request with its response on the
+   * wire (engine-level correlation identity, carried through unchanged).
+   *
+   * COMPAT: 旧 serve 无 requestId 的兼容路径（缺省为 undefined，等价空串），后续版本解除。
+   */
+  requestId?: string;
 }
 
 // ---- Sensitive Info ----
