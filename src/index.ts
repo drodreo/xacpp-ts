@@ -7,6 +7,7 @@ export type {
   InvokeActivityPayload,
   CancelActivityPayload,
   CompactActivityPayload,
+  SetActivityModePayload,
   AvailableActivitiesResponse,
 } from "./commands";
 export { genericCommand, commandName } from "./commands";

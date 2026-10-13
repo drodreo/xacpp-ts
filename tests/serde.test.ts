@@ -31,6 +31,7 @@ import type {
   LastActivityPayload,
   ListActivityPayload,
   NewActivityPayload,
+  SetActivityModePayload,
   SwitchActivityPayload,
 } from "../src/commands";
 import { genericCommand } from "../src/commands";
@@ -39,6 +40,7 @@ import type {
   QuestionPayload,
   SensitiveInfoOperationPayload,
 } from "../src/events/interaction";
+import type { ToolResultEvent } from "../src/events/payload";
 
 // ---- XacppEvent round-trip ----
 
@@ -768,6 +770,38 @@ describe("Lifecycle command payload serialization", () => {
     expect(JSON.stringify(bare)).toBe('{"activity":"act-2","agent":"agent-a"}');
   });
 
+  it("ActivityInfo mode field roundtrip and legacy compatibility", () => {
+    const autoInfo: ActivityInfo = { activity: "act-1", agent: "agent-a", mode: "auto" };
+    expect(JSON.stringify(autoInfo)).toContain('"mode":"auto"');
+    expect(JSON.parse(JSON.stringify(autoInfo)) as ActivityInfo).toEqual(autoInfo);
+
+    const defaultInfo: ActivityInfo = { activity: "act-1", agent: "agent-a", mode: "default" };
+    expect(JSON.stringify(defaultInfo)).toContain('"mode":"default"');
+
+    // legacy JSON without mode → absent field (semantically "default")
+    const legacy: ActivityInfo = JSON.parse('{"activity":"act-1","agent":"agent-a"}');
+    expect(legacy.mode).toBeUndefined();
+  });
+
+  it("SetActivityModePayload roundtrip as generic command arguments", () => {
+    const setAuto = genericCommand(
+      "set_activity_mode",
+      { activity: "act-1", mode: "auto" } satisfies SetActivityModePayload,
+    );
+    const autoJson = JSON.stringify(setAuto);
+    expect(autoJson).toContain('"name":"set_activity_mode"');
+    expect(autoJson).toContain('"mode":"auto"');
+
+    const de = JSON.parse(autoJson) as XacppCommand;
+    if (typeof de === "object" && "generic" in de) {
+      expect(de.generic.name).toBe("set_activity_mode");
+      expect(de.generic.arguments).toEqual({ activity: "act-1", mode: "auto" });
+    }
+
+    const setDefault: SetActivityModePayload = { activity: "act-1", mode: "default" };
+    expect(JSON.parse(JSON.stringify(setDefault))).toEqual(setDefault);
+  });
+
   it("activity_ready / acknowledge response constructors", () => {
     const ready = genericResponse("activity_ready", {
       activity: "act-1",
@@ -783,5 +817,30 @@ describe("Lifecycle command payload serialization", () => {
 
     const ack = acknowledge();
     expect(ack).toEqual({ kind: "generic", name: "acknowledge", data: null });
+  });
+});
+
+// ---- Tool result event auto flag ----
+
+describe("ToolResultEvent auto flag serialization", () => {
+  it("auto flag roundtrip", () => {
+    const event: ToolResultEvent = {
+      requestId: "req-1",
+      toolName: "bash",
+      index: 0,
+      parts: [{ type: "text", text: "done" }],
+      auto: true,
+    };
+
+    const json = JSON.stringify(event);
+    expect(json).toContain('"auto":true');
+    expect(JSON.parse(json) as ToolResultEvent).toEqual(event);
+  });
+
+  it("legacy JSON without auto flag parses with undefined auto", () => {
+    const de = JSON.parse(
+      '{"requestId":"req-1","toolName":"bash","index":0,"parts":[{"type":"text","text":"done"}]}',
+    ) as ToolResultEvent;
+    expect(de.auto).toBeUndefined();
   });
 });

@@ -66,6 +66,8 @@ export interface ActivityInfo {
   updatedAt?: string;
   /** Activity working directory (may use the `$AGENT_HOME` placeholder). */
   workingDir?: string;
+  /** Authorization mode; absent means "default" (per-request approval). */
+  mode?: "default" | "auto";
 }
 
 // ---- Payload types ----
