@@ -40,6 +40,8 @@ export interface ToolResultEvent {
   toolName: string;
   index: number;
   parts: ContentPart[];
+  /** 该工具结果经活动 auto 授权模式自批产生；缺省 = false（非自批）。 */
+  auto?: boolean;
 }
 
 /** 安全告警事件载荷。 */
