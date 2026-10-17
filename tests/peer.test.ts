@@ -20,6 +20,9 @@ import { newEvent, newActivityEvent } from "../src/events";
 import type { XacppSessionHandler, EstablishHandler, EstablishDecision, NegotiateHandler } from "../src/handler";
 import type { Capabilities, EffectiveCapabilities } from "../src/capability";
 import { XacppPeer, PeerState } from "../src/peer";
+import { XacppSession } from "../src/session";
+import type { Frame } from "../src/frame";
+import type { TransferActivityHandlers, TransferWiring } from "../src/transfer";
 import type {
   ActionRequestPayload,
   ActionResponse,
@@ -154,7 +157,7 @@ class InteractionEstablishHandler implements EstablishHandler {
 // ---- DirectTransport ----
 
 /** In-memory direct Transport, simulates bidirectional communication. */
-class DirectTransport implements XacppTransport {
+class DirectTransport implements XacppTransport, TransferWiring {
   private _connected = false;
   private _exhausted = false; // cannot reconnect after disconnect
   private peer: DirectTransport | null = null;
@@ -254,6 +257,20 @@ class DirectTransport implements XacppTransport {
     return () => {};
   }
 
+  // ---- TransferWiring (no-op: envelope-only mock, no frame channel) ----
+
+  writeControlFrame(_bytes: Uint8Array): void {
+    // No frame channel in this mock.
+  }
+
+  writeDataFrame(_frame: Frame): void {
+    // No frame channel in this mock.
+  }
+
+  onTransferActivity(_handlers: TransferActivityHandlers | null): void {
+    // No frame channel in this mock.
+  }
+
   onRequest(handler: RequestHandler): void {
     if (this._connected) throw XacppError.alreadyConnected();
     this.requestHandler = handler;
@@ -325,7 +342,7 @@ async function connectedPeers(): Promise<[XacppPeer, XacppPeer]> {
     produceEvents: [{ name: "think" }, { name: "info" }],
   };
   const capsBot: Capabilities = { commands: [], produceEvents: [], acceptEvents: [] };
-  const peerA = new XacppPeer(capsAgent, a, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler());
+  const peerA = new XacppPeer(capsAgent, a, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler(), new XacppSession());
   const peerB = new XacppPeer(capsBot, b, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler());
   await peerA.connect();
   await peerB.connect();
@@ -343,7 +360,7 @@ async function negotiatedPeers(): Promise<[XacppPeer, XacppPeer]> {
 async function interactionPeers(): Promise<[XacppPeer, XacppPeer]> {
   const [a, b] = duplexPair();
   const caps: Capabilities = { commands: [], produceEvents: [], acceptEvents: [] };
-  const peerA = new XacppPeer(caps, a, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler());
+  const peerA = new XacppPeer(caps, a, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler(), new XacppSession());
   const peerB = new XacppPeer(caps, b, new AcceptAllNegotiateHandler(), new InteractionEstablishHandler());
   await peerA.connect();
   await peerB.connect();
@@ -781,19 +798,19 @@ describe("EffectiveCapabilities", () => {
     };
 
     const [transportA, transportB] = duplexPair();
-    const peerA = new XacppPeer(capsA, transportA, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler());
+    const peerA = new XacppPeer(capsA, transportA, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler(), new XacppSession());
     const peerB = new XacppPeer(capsB, transportB, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler());
     await peerA.connect();
     await peerB.connect();
     await peerA.negotiate();
 
     // Establish session
-    await timeout(peerA.establish(undefined, new TestSessionHandler(), () => {}));
+    const session = await timeout(peerA.establish(undefined, new TestSessionHandler(), () => {}));
 
     // Try to emit "think" event which is NOT in emitEvents (only "content_delta")
-    // peer.requestEvent validates against emitEvents; session.requestEvent bypasses peer
+    // session.requestEvent validates against the negotiated emitEvents capability.
     await expect(
-      timeout(peerA.requestEvent(null, newActivityEvent("test-act", newEvent("think", { content: "hi" })))),
+      timeout(session.requestEvent(newActivityEvent("test-act", newEvent("think", { content: "hi" })))),
     ).rejects.toThrow();
   });
 
@@ -980,7 +997,7 @@ describe("Multi session routing", () => {
     // peerB uses SequencedEstablishHandler, each session gets an identified handler
     const [transportA, transportB] = duplexPair();
     const emptyCaps: Capabilities = { commands: [], produceEvents: [], acceptEvents: [] };
-    const peerA = new XacppPeer(emptyCaps, transportA, new AcceptAllNegotiateHandler(), new SequencedEstablishHandler());
+    const peerA = new XacppPeer(emptyCaps, transportA, new AcceptAllNegotiateHandler(), new SequencedEstablishHandler(), new XacppSession());
     const peerB = new XacppPeer(emptyCaps, transportB, new AcceptAllNegotiateHandler(), new SequencedEstablishHandler());
     await peerA.connect();
     await peerB.connect();
@@ -1029,7 +1046,7 @@ describe("Challenge handshake", () => {
 
   it("establish challenge flow", async () => {
     const [transportA, transportB] = duplexPair();
-    const peerA = new XacppPeer(emptyCaps, transportA, new AcceptAllNegotiateHandler(), new ChallengeEstablishHandler());
+    const peerA = new XacppPeer(emptyCaps, transportA, new AcceptAllNegotiateHandler(), new ChallengeEstablishHandler(), new XacppSession());
     const peerB = new XacppPeer(emptyCaps, transportB, new AcceptAllNegotiateHandler(), new ChallengeEstablishHandler());
     await peerA.connect();
     await peerB.connect();
@@ -1049,7 +1066,7 @@ describe("Challenge handshake", () => {
 
   it("establish challenge issues credentials", async () => {
     const [transportA, transportB] = duplexPair();
-    const peerA = new XacppPeer(emptyCaps, transportA, new AcceptAllNegotiateHandler(), new ChallengeEstablishHandler());
+    const peerA = new XacppPeer(emptyCaps, transportA, new AcceptAllNegotiateHandler(), new ChallengeEstablishHandler(), new XacppSession());
     const peerB = new XacppPeer(emptyCaps, transportB, new AcceptAllNegotiateHandler(), new ChallengeEstablishHandler());
     await peerA.connect();
     await peerB.connect();
@@ -1141,7 +1158,7 @@ describe("Interaction commands", () => {
       }
     }
 
-    const peerA = new XacppPeer(caps, a, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler());
+    const peerA = new XacppPeer(caps, a, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler(), new XacppSession());
     const peerB = new XacppPeer(caps, b, new AcceptAllNegotiateHandler(), new RejectEstablishHandler());
     await peerA.connect();
     await peerB.connect();

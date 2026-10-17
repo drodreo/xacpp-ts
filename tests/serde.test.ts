@@ -702,11 +702,11 @@ describe("Lifecycle command payload serialization", () => {
 
     const invokeActivity: InvokeActivityPayload = {
       activity: "act-1",
-      messages: [{ type: "text", text: "hello" }],
+      messages: [{ type: "text", text: "hello", partType: "default" }],
     };
     const invokeJson = JSON.stringify(invokeActivity);
     expect(invokeJson).toContain('"activity":"act-1"');
-    expect(invokeJson).toContain('"messages":[{"type":"text","text":"hello"}]');
+    expect(invokeJson).toContain('"text":"hello"');
     expect(JSON.parse(invokeJson)).toEqual(invokeActivity);
 
     const cancelActivity: CancelActivityPayload = { activity: "act-1", reason: "user" };
@@ -828,7 +828,7 @@ describe("ToolResultEvent auto flag serialization", () => {
       requestId: "req-1",
       toolName: "bash",
       index: 0,
-      parts: [{ type: "text", text: "done" }],
+      parts: [{ type: "text", text: "done", partType: "default" }],
       auto: true,
     };
 

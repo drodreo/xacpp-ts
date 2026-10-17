@@ -5,8 +5,11 @@
  *
  * Peer is a protocol layer entity representing one endpoint in the communication link. Core responsibilities:
  *
- * - **Typed operations**: encapsulate Transport's payload-layer API into semantically clear Command / Event operations
- * - **Protocol state machine**: manage connection state
+ * - **Lifecycle orchestration**: connect / negotiate / establish / disconnect — pure
+ *   state-machine choreography; it does not carry communication methods (sends go
+ *   through the session)
+ * - **Session wiring**: an initiator-side peer holds a session, wires it automatically
+ *   on connect, and backfills the negotiated identity after establish
  * - **Session routing**: route inbound requests to the corresponding Session's handler by session_id
  *
  * ## Boundary with Transport
@@ -17,12 +20,12 @@
  * ```text
  * ┌──────────────────────────────────────────────────────────────┐
  * │  Peer (protocol layer)                                       │
- * │  Typed operations: request_command / request_event           │
+ * │  Lifecycle: connect / negotiate / establish / disconnect     │
  * │  Session routing: session_id → XacppSessionHandler          │
  * ├──────────────────────────────────────────────────────────────┤
  * │  Session (session layer)                                     │
- * │  Holds XacppSessionHandler, sends directly to Transport      │
- * │  Does not go through Peer                                    │
+ * │  Identity + transfer state + typed sends (command / event /  │
+ * │  binary) — wired to the transport while connected            │
  * ├──────────────────────────────────────────────────────────────┤
  * │  Transport (transport layer)                                 │
  * │  Single semantic: send (request-response), caller chooses    │
@@ -43,6 +46,7 @@ import type { Capabilities, EffectiveCapabilities } from "./capability";
 import type { EstablishDecision, EstablishHandler, NegotiateHandler, XacppSessionHandler } from "./handler";
 import { computeEffectiveCapabilities } from "./capability";
 import { XacppSession } from "./session";
+import type { TransferWiring } from "./transfer";
 
 /** Peer protocol state. */
 export enum PeerState {
@@ -57,9 +61,13 @@ export enum PeerState {
 /** XACPP protocol endpoint.
  *
  * Each communication party holds a `XacppPeer` instance, exchanging messages via a shared Transport.
+ * Initiator side: pass a session — the peer wires it automatically on
+ * connect and backfills the identity after `establish`. Responder side:
+ * omit the session — identity sessions are created inside `onEstablish`.
  */
 export class XacppPeer {
   private transport: XacppTransport;
+  private readonly session: XacppSession | null;
   private _state: PeerState = PeerState.Disconnected;
   private sessions: Map<string, XacppSessionHandler> = new Map();
   private establishHandler: EstablishHandler;
@@ -68,8 +76,15 @@ export class XacppPeer {
   private _remoteCapabilities: Capabilities = { commands: [], produceEvents: [], acceptEvents: [] };
   private _emitEvents: string[] = [];
 
-  constructor(capabilities: Capabilities, transport: XacppTransport, negotiateHandler: NegotiateHandler, establishHandler: EstablishHandler) {
+  constructor(
+    capabilities: Capabilities,
+    transport: XacppTransport,
+    negotiateHandler: NegotiateHandler,
+    establishHandler: EstablishHandler,
+    session?: XacppSession,
+  ) {
     this.transport = transport;
+    this.session = session ?? null;
     this.capabilities = capabilities;
     this.establishHandler = establishHandler;
     this.negotiateHandler = negotiateHandler;
@@ -95,7 +110,8 @@ export class XacppPeer {
   /** Establish connection.
    *
    * Registers routing closure with Transport, then starts the underlying communication channel.
-   * On success, state transitions to `Connected`; subsequent `establish` calls can create logical sessions.
+   * On success, state transitions to `Connected` and the held session (if any) is wired to the
+   * transport automatically; subsequent `establish` calls backfill the session identity.
    */
   async connect(): Promise<void> {
     const self = this;
@@ -155,6 +171,9 @@ export class XacppPeer {
     if (this._state === PeerState.Disconnected) {
       this._state = PeerState.Connected;
     }
+    if (this.session) {
+      this.session.wire(this.transport as XacppTransport & TransferWiring);
+    }
   }
 
   /** Negotiate capabilities with the peer.
@@ -175,6 +194,7 @@ export class XacppPeer {
       this._remoteCapabilities = response.capabilities;
       const effective = computeEffectiveCapabilities(this.capabilities, response.capabilities);
       this._emitEvents = effective.emitEvents;
+      this.session?.setEmitEvents(effective.emitEvents);
       await this.negotiateHandler.onNegotiate(effective);
       this._state = PeerState.Negotiated;
       return;
@@ -190,7 +210,8 @@ export class XacppPeer {
   /** Establish logical session.
    *
    * Sends Establish command to peer, carrying optional auth credentials and session handler.
-   * Handler is registered in Peer routing table; Session is responsible for sending.
+   * Handler is registered in Peer routing table; on success the held session's identity is
+   * backfilled and the session is returned (already wired by `connect`).
    */
   async establish(
     credentials: string | undefined,
@@ -200,6 +221,9 @@ export class XacppPeer {
     if (this._state !== PeerState.Negotiated) {
       throw XacppError.invalidState("establish requires Negotiated state");
     }
+    if (!this.session) {
+      throw XacppError.invalidState("establish requires a session (pass one to the peer constructor)");
+    }
     const response = await this.transport.send(null, {
       kind: "command",
       payload: { establish: { credentials } },
@@ -207,11 +231,9 @@ export class XacppPeer {
 
     if (response.kind === "established") {
       this.sessions.set(response.sessionId, handler);
-      return new XacppSession(
-        this.transport,
-        response.sessionId,
-        response.credentials,
-      );
+      const session = this.sessionForEstablish();
+      session.bindIdentity(response.sessionId, response.credentials);
+      return session;
     }
 
     if (response.kind === "establish_prepare") {
@@ -223,11 +245,9 @@ export class XacppPeer {
 
       if (confirmResponse.kind === "established") {
         this.sessions.set(confirmResponse.sessionId, handler);
-        return new XacppSession(
-          this.transport,
-          confirmResponse.sessionId,
-          confirmResponse.credentials,
-        );
+        const session = this.sessionForEstablish();
+        session.bindIdentity(confirmResponse.sessionId, confirmResponse.credentials);
+        return session;
       }
 
       if (confirmResponse.kind === "establish_reject") {
@@ -258,34 +278,18 @@ export class XacppPeer {
     this._state = PeerState.Disconnected;
     this.sessions.clear();
     this._remoteCapabilities = { commands: [], produceEvents: [], acceptEvents: [] };
-  }
-
-  // ---- Active sends (no session context) ----
-
-  /** Send command and wait for response (no session context). */
-  async requestCommand(sessionId: string | null, command: XacppCommand): Promise<XacppResponse> {
-    return this.transport.send(sessionId, { kind: "command", payload: command });
-  }
-
-  /** Send interactive event and wait for response (no session context). */
-  async requestEvent(sessionId: string | null, event: XacppActivityEvent): Promise<XacppResponse> {
-    const eventName = event.event.name;
-    if (this._emitEvents.length > 0 && !this._emitEvents.includes(eventName)) {
-      throw XacppError.invalidState(`event '${eventName}' not in negotiated emitEvents capability`);
-    }
-    return this.transport.send(sessionId, { kind: "event", payload: event });
+    this._emitEvents = [];
   }
 
   /**
-   * Send event fire-and-forget (no session context): returns as soon as the
-   * frame is queued for writing, never waits for the ack.
+   * Session to bind for an establish success: the first establish backfills
+   * the held session; later establishes spawn fresh (default-configuration)
+   * sessions wired to the transport — one logical session per establish.
    */
-  async sendEvent(sessionId: string | null, event: XacppActivityEvent): Promise<void> {
-    // Validate event name against the negotiated emitEvents capability
-    const eventName = event.event.name;
-    if (this._emitEvents.length > 0 && !this._emitEvents.includes(eventName)) {
-      throw XacppError.invalidState(`event '${eventName}' not in negotiated emitEvents capability`);
-    }
-    return this.transport.sendFaf(sessionId, { kind: "event", payload: event });
+  private sessionForEstablish(): XacppSession {
+    if (this.session && !this.session.identityBound) return this.session;
+    const fresh = new XacppSession();
+    fresh.wire(this.transport as XacppTransport & TransferWiring);
+    return fresh;
   }
 }

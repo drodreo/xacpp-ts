@@ -10,18 +10,24 @@ xacpp defines the communication protocol between an agent and its peers. It prov
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  Peer (protocol layer)                                       │
-│  Typed operations + session routing                          │
+│  Peer (lifecycle orchestration, initiator side)              │
+│  negotiate → connect → establish → disconnect                │
 ├──────────────────────────────────────────────────────────────┤
-│  Session (session layer)                                     │
-│  Independent session context, sends directly via Transport   │
+│  Session (communication facade + transfer state)             │
+│  requestCommand / sendEvent / sendBinary;                    │
+│  owns TransferSession (ACK/NACK/RESUME/heartbeat),           │
+│  wires itself onto the current transport                     │
 ├──────────────────────────────────────────────────────────────┤
-│  Transport (transport layer)                                 │
-│  Envelope assembly, id correlation, pending matching         │
+│  Transport (connection entity)                               │
+│  Physical IO, binary framing, single-FIFO egress             │
 ├──────────────────────────────────────────────────────────────┤
-│  Stdio / TCP / WebSocket                                     │
+│  Stdio / TCP                                                  │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+A session outlives individual connections: on disconnect the transfer state
+stays in the session; on reconnect the session wires itself onto the new
+transport and interrupted transfers resume from the breakpoint.
 
 ## Install
 
@@ -34,40 +40,51 @@ npm install xacpp
 ### Establish a session (initiator side)
 
 ```typescript
-import { XacppPeer, XacppSession, StdioTransport, XacppSessionHandler, XacppResponse } from "xacpp";
+import {
+  XacppPeer, XacppSession, SocketTransport,
+  NegotiateHandler, EstablishHandler, XacppSessionHandler,
+} from "xacpp";
 
-// Create transport + peer
-const transport = new StdioTransport(process.stdout, process.stdin);
+// A session owns its transfer state; it is created independently of any
+// connection and wires itself onto transports as they come and go.
+const session = new XacppSession(); // TransferConfig::default()
 
-const peer = new XacppPeer(transport, {
-  async onEstablish(transport, credentials) {
-    return { sessionId: "server-session", handler: mySessionHandler };
-  },
-});
+const transport = SocketTransport.connectTo(8080, "127.0.0.1");
 
+// Peer orchestrates the lifecycle and auto-wires the session on connect.
+const peer = new XacppPeer(
+  { commands: [], produceEvents: [], acceptEvents: [] }, // capabilities
+  transport,
+  negotiateHandler,
+  establishHandler,
+  session,
+);
 await peer.connect();
 
-// Establish a logical session
-const session = await peer.establish(null, mySessionHandler);
+// Establish a logical session (fills identity/emit-events into the session).
+await peer.establish(undefined, mySessionHandler, () => {});
 
-// Send commands/events through the session
+// Send commands/events/binary through the session facade.
 const response = await session.requestCommand("new_activity");
-await session.requestEvent({ type: "think", content: "Hello!" });
+await session.sendEvent({ type: "think", content: "Hello!" });
+const txid = session.sendBinary(payload, (result) => {
+  /* BinarySendResult: exactly-once terminal state */
+});
 ```
 
-### Handle incoming requests (responder side)
+### Handle incoming connections (responder side)
 
 ```typescript
-const sessionHandler: XacppSessionHandler = {
-  async onCommand(command) {
-    // Handle command
-    return { kind: "acknowledge" };
-  },
-  async onEvent(event) {
-    // Handle event
-    return { kind: "acknowledge" };
-  },
-};
+// Responder side has no peer: accept a connection, create a session,
+// restore identity if reconnecting, and wire the session onto the transport.
+const session = new XacppSession();
+session.bindIdentity("session-1", credentials);
+session.wire(transport); // auto-unwires on close
+session.onBinary((txid, payload) => { /* consume */ });
+
+transport.onRequest((_sessionId, payload) => {
+  // Return XacppResponse for inbound commands/events
+});
 ```
 
 ### TCP Transport (for network communication)
@@ -88,15 +105,15 @@ const server = new SocketTransport(acceptedSocket);
 
 | Type | Description |
 |------|-------------|
-| `XacppTransport` | Transport interface (`connect`, `disconnect`, `send`, `onRequest`) |
-| `XacppPeer` | Protocol endpoint with session routing |
-| `XacppSession` | Logical session, sends via Transport directly |
+| `XacppPeer` | Lifecycle orchestration (negotiate/connect/establish/disconnect); wires the session onto the transport automatically (initiator side) |
+| `XacppSession` | Communication facade (`requestCommand`/`sendEvent`/`sendBinary`); owns transfer state, survives reconnections, `wire`/`unwire` onto transports |
+| `TransferSession` | Transfer-transaction state machine (ACK/NACK/RESUME/heartbeat/backpressure); owned by `XacppSession` |
+| `TransferConfig` | Transfer tuning (heartbeat interval, silent timeout, ACK batching, tick) |
+| `XacppTransport` | Connection entity: physical IO, binary framing, single-FIFO egress |
 | `XacppSessionHandler` | Handles inbound Command/Event for a session |
-| `EstablishHandler` | Handles Establish handshake requests |
-| `XacppCommand` | Protocol commands (`establish`, `new_activity`, etc.) |
+| `NegotiateHandler` / `EstablishHandler` | Handshake handlers |
+| `XacppCommand` / `XacppEvent` | Protocol commands and events |
 | `ActivityRef` | Activity identifier reference shared by command and event envelopes (`{id}`) |
-| `XacppEvent` | Protocol events (think, content_delta, pair_complete, etc.) |
-| `XacppRequest` | Request payload (`command` or `event`) |
 | `XacppResponse` | Response payload (`established`, `acknowledge`, `action`, etc.) |
 | `XacppError` | Error class with machine-readable codes |
 | `PeerState` | Peer state enum (`Disconnected`, `Connected`) |
@@ -105,12 +122,12 @@ const server = new SocketTransport(acceptedSocket);
 
 | Class | Description |
 |-------|-------------|
-| `StdioTransport` | stdin/stdout JSONL pipe |
+| `StdioTransport` | stdin/stdout binary-frame pipe |
 | `SocketTransport` | TCP socket (`net.Socket`), spawn-per-request concurrency |
 
 ## Wire Protocol
 
-JSONL (one JSON object per line) with envelope structure:
+Framing is the XACPP binary frame protocol (docs/SPEC.md §3/§4): every envelope travels as the payload of a `DATA_JSON` frame. Envelope structure:
 
 ```json
 {"type":"request","id":"r1","payload":{"kind":"command","payload":{"establish":{"credentials":null}}}}
@@ -128,6 +145,16 @@ The activity event envelope carries a structured `activity: {"id": string}` refe
 ## Command Declarations
 
 Command declaration schemas may carry a `dispatcher` field with enum value `"bridge" | "tool"`, defaulting to `"bridge"`: `bridge` means the command goes through the event bridge system path; `tool` means injection into the receiving side's model tool surface (same-name replace, peer declarations take precedence). Declaration schemas are pass-through JSON — the protocol library does not enforce types.
+
+## Performance
+
+Baselines measured by `pnpm bench:protocol` and `pnpm bench:egress` (TCP loopback; requires Node >= 22.2). These numbers are the reference for future optimization work.
+
+- Codec (pure encode/decode): frame overhead −38% to −83% vs the JSONL baseline (CRC + 40 B header) — the full-chain bottleneck is not the codec
+- Request-response RTT: p50 0.071 ms at ~11.9k req/s
+- 64 MiB `sendBinary` (1 MiB working frames): 448 MiB/s single stream; 4 × 16 MiB concurrent: 399 MiB/s
+- Control-frame insertion: heartbeat p50 under bulk ≈ 98 ms — one in-flight write cycle
+- Ordered egress over a raw peer: ~196k events/s enqueue, ~38k events/s drain
 
 ## License
 

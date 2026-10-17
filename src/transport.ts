@@ -17,7 +17,7 @@
  *   in submission order (see `egress` module)
  * - **Envelope packing/unpacking**: auto-assign request id, pack into envelope for sending, unpack to return payload
  * - **Request-response correlation**: match pending sends by id upon receiving a Response
- * - **Encoding/decoding**: serialization / deserialization (JSONL)
+ * - **Encoding/decoding**: envelope serialization / deserialization over binary frames (SPEC §3/§4)
  * - **Connection management**: establish / tear down underlying communication channel
  *
  * ## Layer boundary

@@ -1,27 +1,51 @@
 /**
  * Stdio Transport implementation.
  *
- * Communicates via stdin/stdout pipe handles using JSONL frame protocol (one message per line, separated by `\n`).
+ * Communicates via stdin/stdout pipe handles using the XACPP binary frame
+ * protocol (docs/SPEC.md §3/§4): each envelope travels as a single-frame
+ * DATA_JSON transaction. Inbound garbage is tolerated by design: the frame
+ * decoder resyncs by scanning for the "XACP" magic, so stray non-frame
+ * bytes (e.g. child-process log lines that went to stdout instead of
+ * stderr) are silently skipped instead of crashing the accept loop —
+ * stdout is the protocol channel; logs belong on stderr.
  *
  * All outbound frames (requests, events, responses) go through the single
  * ordered egress queue (see `egress`): one drain loop owns the write half
  * and writes frames FIFO in submission order.
  */
 
-import * as readline from "node:readline";
 import type { RequestHandler, XacppTransport } from "./transport";
 import type { XacppEnvelope, XacppRequest, XacppResponse } from "./message";
 import { XacppError } from "./message";
 import { ClosedSignal, Egress } from "./egress";
 import type { EgressHost, EgressWriter, PendingMap } from "./egress";
+import { FrameDecoder, FrameType, encodeFrame, makeFrame } from "./frame";
+import type { Frame } from "./frame";
+import type { TransferActivityHandlers, TransferWiring } from "./transfer";
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 
 /** Stdio Transport implementation. */
-export class StdioTransport implements XacppTransport {
+export class StdioTransport implements XacppTransport, TransferWiring {
   private writer: EgressWriter | null;
   private reader: NodeJS.ReadableStream | null;
-  private rl: readline.Interface | null = null;
   private _connected = false;
   private _exhausted = false; // No reconnection after disconnect
+
+  /** Registered transfer-session hooks (present while a session is wired). */
+  private transferHandlers: TransferActivityHandlers | null = null;
+
+  /** Streaming frame decoder (one per connection, present after connect). */
+  private decoder: FrameDecoder | null = null;
+  /** Set after a protocol-level decode error; the stream is unusable past it. */
+  private decoderDead = false;
+  /** Reader event listeners (kept for removal on disconnect). */
+  private onData: ((chunk: Buffer | string) => void) | null = null;
+  private onReaderClosed: (() => void) | null = null;
+  private onReaderEnded: (() => void) | null = null;
+  /** Idempotency guard: reader teardown fires once per connection. */
+  private readerGone = false;
 
   /** Handler registration. */
   private requestHandler: RequestHandler | null = null;
@@ -65,21 +89,46 @@ export class StdioTransport implements XacppTransport {
     if (this._connected) throw XacppError.alreadyConnected();
     if (!this.writer || !this.reader) throw XacppError.alreadyConnected();
 
-    this.rl = readline.createInterface({ input: this.reader });
+    // Streaming receive: raw byte chunks feed the frame decoder (no line
+    // splitting — frame boundaries come from the wire format, not "\n").
+    this.decoder = new FrameDecoder();
+    this.decoderDead = false;
+    this.readerGone = false;
 
-    this.rl.on("line", (line: string) => {
-      this.onFrame(line);
-    });
-
-    this.rl.on("close", () => {
+    this.onData = (chunk) => {
+      if (this.decoderDead) return;
+      const bytes = typeof chunk === "string" ? textEncoder.encode(chunk) : new Uint8Array(chunk);
+      let frames: Frame[];
+      try {
+        frames = this.decoder!.push(bytes);
+      } catch (e) {
+        // Protocol violation (version / CRC / oversize): the stream cannot
+        // be resynced — connection-level throw semantics = connection dead.
+        this.decoderDead = true;
+        console.error(
+          "[xacpp:stdio] frame decode failed, closing connection: %s",
+          e instanceof Error ? e.message : String(e),
+        );
+        this.onReaderGone();
+        return;
+      }
+      for (const frame of frames) this.onWireFrame(frame);
+    };
+    this.onReaderClosed = () => {
       console.info("[xacpp:stdio] accept loop exited");
       this.onReaderGone();
-    });
+    };
+    this.onReaderEnded = this.onReaderClosed;
+
+    this.reader.on("data", this.onData);
+    this.reader.on("close", this.onReaderClosed);
+    this.reader.on("end", this.onReaderEnded);
 
     // Ordered egress: drain loop owns the write half.
     this.egress = new Egress(this.writer, this.egressHost, this.closedSignal);
 
     this._connected = true;
+
     console.debug("[xacpp:stdio] connected");
   }
 
@@ -91,10 +140,16 @@ export class StdioTransport implements XacppTransport {
     this.egress = null;
     this._connected = false;
 
-    if (this.rl) {
-      this.rl.close();
-      this.rl = null;
+    if (this.reader) {
+      if (this.onData) this.reader.removeListener("data", this.onData);
+      if (this.onReaderClosed) this.reader.removeListener("close", this.onReaderClosed);
+      if (this.onReaderEnded) this.reader.removeListener("end", this.onReaderEnded);
     }
+    this.onData = null;
+    this.onReaderClosed = null;
+    this.onReaderEnded = null;
+    this.decoder = null;
+
     this.reader = null;
     this.writer = null;
 
@@ -119,7 +174,7 @@ export class StdioTransport implements XacppTransport {
         payload,
       };
 
-      egress.sendAcked(JSON.stringify(envelope) + "\n").catch(() => {
+      egress.sendAcked(this.encodeEnvelope(envelope)).catch(() => {
         this.pending.delete(id);
         reject(XacppError.closed());
       });
@@ -143,7 +198,7 @@ export class StdioTransport implements XacppTransport {
     };
 
     try {
-      egress.sendFaf(JSON.stringify(envelope) + "\n");
+      egress.sendFaf(this.encodeEnvelope(envelope));
     } catch {
       this.pending.delete(id);
       throw XacppError.closed();
@@ -161,18 +216,40 @@ export class StdioTransport implements XacppTransport {
 
   // ---- Internal ----
 
-  /** Process a frame received from the wire. */
-  private async onFrame(line: string): Promise<void> {
+  /** Serialize an envelope into a single-frame DATA_JSON transaction (SPEC §3/§4). */
+  private encodeEnvelope(envelope: XacppEnvelope): Uint8Array {
+    return encodeFrame(makeFrame(FrameType.DATA_JSON, textEncoder.encode(JSON.stringify(envelope))));
+  }
+
+  /** Process one decoded wire frame: DATA_JSON carries the envelope; transfer frames go to the wired session. */
+  private onWireFrame(frame: Frame): void {
+    if (frame.frameType === FrameType.DATA_JSON) {
+      // Any inbound frame proves the peer alive — refresh the silence clock.
+      this.transferHandlers?.onActivity();
+    } else if (this.transferHandlers) {
+      // Transfer channel: DATA_BINARY reassembly + control dispatch.
+      this.transferHandlers.onFrame(frame);
+      return;
+    } else {
+      // No transfer session wired: nothing to route non-envelope frames to.
+      console.debug("[xacpp:stdio] ignoring frame type 0x%s", frame.frameType.toString(16));
+      return;
+    }
+
+    const payloadText = textDecoder.decode(frame.payload);
     let envelope: XacppEnvelope;
     try {
-      envelope = JSON.parse(line);
+      envelope = JSON.parse(payloadText);
     } catch {
-      console.debug("[xacpp::stdio::log] %s", line);
+      // Expected with stdio carriers: garbage that survived the decoder's
+      // magic resync (e.g. a stray "XACP"-prefixed log line) lands here.
+      // Log-only, never fatal.
+      console.debug("[xacpp::stdio::log] %s", payloadText);
       return;
     }
 
     if (envelope.type === "request") {
-      await this.handleRequest(envelope.id, envelope.session_id ?? null, envelope.payload);
+      void this.handleRequest(envelope.id, envelope.session_id ?? null, envelope.payload);
     } else if (envelope.type === "response") {
       this.handleResponse(envelope.id, envelope.payload);
     }
@@ -200,7 +277,7 @@ export class StdioTransport implements XacppTransport {
       payload: responsePayload,
     };
     try {
-      await this.egress?.sendAcked(JSON.stringify(response) + "\n");
+      await this.egress?.sendAcked(this.encodeEnvelope(response));
     } catch {
       console.warn("[xacpp:stdio] failed to send response for request %s", id);
     }
@@ -222,10 +299,31 @@ export class StdioTransport implements XacppTransport {
 
   /** Cleanup on reader exit: connection dead — fail fast subsequent sends, drop pending waiters. */
   private onReaderGone(): void {
+    if (this.readerGone) return;
+    this.readerGone = true;
     this._connected = false;
     this.rejectAllPending();
     this.egress?.close();
     this.egress = null;
+  }
+
+  // ---- Transfer wiring (session attachment surface) ----
+
+  /** Write one encoded control frame through the ordered egress (scheduling priority). */
+  writeControlFrame(bytes: Uint8Array): void {
+    if (!this.egress) throw XacppError.notConnected();
+    this.egress.sendControl(bytes);
+  }
+
+  /** Write one data frame, encoded, through the ordered egress (fire-and-forget FIFO). */
+  writeDataFrame(frame: Frame): void {
+    if (!this.egress) throw XacppError.notConnected();
+    this.egress.sendFaf(encodeFrame(frame));
+  }
+
+  /** Register/unregister the transfer-session activity hooks. */
+  onTransferActivity(handlers: TransferActivityHandlers | null): void {
+    this.transferHandlers = handlers;
   }
 
   private rejectAllPending(): void {
