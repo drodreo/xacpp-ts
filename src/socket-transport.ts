@@ -1,22 +1,30 @@
 import * as net from "node:net";
-import * as readline from "node:readline";
 import type { RequestHandler, XacppTransport } from "./transport";
 import type { XacppEnvelope, XacppRequest, XacppResponse } from "./message";
 import { XacppError } from "./message";
 import { ClosedSignal, Egress } from "./egress";
 import type { EgressHost, PendingMap } from "./egress";
+import { FrameDecoder, FrameType, encodeFrame, makeFrame } from "./frame";
+import type { Frame } from "./frame";
+import type { TransferActivityHandlers, TransferWiring } from "./transfer";
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 
 /**
  * Socket Transport Implementation.
  *
- * Communicates via TCP connection using JSONL frame protocol (one message per line, delimited by `\n`).
+ * Communicates via TCP connection using the XACPP binary frame protocol
+ * (docs/SPEC.md §3/§4): each envelope travels as a single-frame DATA_JSON
+ * transaction. Inbound bytes stream into the frame decoder — frame
+ * boundaries come from the wire format, not line splitting.
  * Key difference from StdioTransport: each inbound request spawns independent task for concurrent handling.
  *
  * All outbound frames (requests, events, responses) go through the single
  * ordered egress queue (see `egress`): one drain loop owns the write half
  * and writes frames FIFO in submission order.
  */
-export class SocketTransport implements XacppTransport {
+export class SocketTransport implements XacppTransport, TransferWiring {
   private socket: net.Socket | null = null;
   private handler: RequestHandler | null = null;
   private pending: PendingMap = new Map();
@@ -24,10 +32,31 @@ export class SocketTransport implements XacppTransport {
   private _connected = false;
   private _exhausted = false;
 
+  /** Registered transfer-session hooks (present while a session is wired). */
+  private transferHandlers: TransferActivityHandlers | null = null;
+
   /** Connection-close broadcast (see `XacppTransport.onClosed`). */
   private readonly closedSignal = new ClosedSignal();
   /** Ordered egress entry (present after connect). */
   private egress: Egress | null = null;
+
+  /** Streaming frame decoder (one per connection, present after connect). */
+  private decoder: FrameDecoder | null = null;
+  /** Set after a protocol-level decode error; the stream is unusable past it. */
+  private decoderDead = false;
+  /** Socket event listeners (kept for removal on disconnect). */
+  private onData: ((chunk: Buffer) => void) | null = null;
+  private onSocketClosed: (() => void) | null = null;
+  private onSocketEnded: (() => void) | null = null;
+  /**
+   * Resident socket 'error' listener: a transport-level error (peer reset,
+   * network failure) means the connection is dead. Without a listener, Node
+   * escalates the event to an uncaught exception and takes the host process
+   * down — a peer that dies abruptly is a normal event, not a crash.
+   */
+  private onSocketError: ((err: Error) => void) | null = null;
+  /** Idempotency guard: reader teardown fires once per connection. */
+  private readerGone = false;
 
   // Concurrency control: inflight handler tasks, all aborted on disconnect.
   private inflight: Set<AbortController> = new Set();
@@ -35,9 +64,6 @@ export class SocketTransport implements XacppTransport {
   // Client-mode connection parameters
   private port?: number;
   private host?: string;
-
-  // readline interface
-  private rl: readline.Interface | null = null;
 
   /** Egress host integration points. */
   private readonly egressHost: EgressHost = {
@@ -83,19 +109,53 @@ export class SocketTransport implements XacppTransport {
       });
     }
 
-    // Common to both modes: start readline receiver
+    // Common to both modes: start the streaming frame decoder receiver.
     const sock = this.socket!;
-    this.rl = readline.createInterface({ input: sock });
-    this.rl.on("line", (line) => this.onFrame(line));
-    this.rl.on("close", () => {
+    this.decoder = new FrameDecoder();
+    this.decoderDead = false;
+    this.readerGone = false;
+
+    this.onData = (chunk) => {
+      if (this.decoderDead) return;
+      let frames: Frame[];
+      try {
+        frames = this.decoder!.push(new Uint8Array(chunk));
+      } catch (e) {
+        // Protocol violation (version / CRC / oversize): the stream cannot
+        // be resynced — connection-level throw semantics = connection dead.
+        this.decoderDead = true;
+        console.error(
+          "[xacpp:socket] frame decode failed, closing connection: %s",
+          e instanceof Error ? e.message : String(e),
+        );
+        this.onReaderGone();
+        return;
+      }
+      for (const frame of frames) this.onWireFrame(frame);
+    };
+    this.onSocketClosed = () => {
       console.info("[xacpp:socket] reader task exited, cleaning up");
       this.onReaderGone();
-    });
+    };
+    this.onSocketEnded = this.onSocketClosed;
+    // Resident error path: a socket error (peer reset, network failure) is a
+    // dead connection, not a host crash. Idempotent with the close path via
+    // onReaderGone's guard (Node always emits 'close' after 'error').
+    this.onSocketError = (err: Error) => {
+      console.warn("[xacpp:socket] socket error, connection dead: %s", err.message);
+      this.onReaderGone();
+    };
+
+    sock.on("data", this.onData);
+    sock.on("close", this.onSocketClosed);
+    sock.on("end", this.onSocketEnded);
+    sock.on("error", this.onSocketError);
 
     // Ordered egress: drain loop owns the write half.
     this.egress = new Egress(sock, this.egressHost, this.closedSignal);
 
     this._connected = true;
+
     console.debug("[xacpp:socket] connected");
   }
 
@@ -113,11 +173,18 @@ export class SocketTransport implements XacppTransport {
     }
     this.inflight.clear();
 
-    // Close readline
-    if (this.rl) {
-      this.rl.close();
-      this.rl = null;
+    // Detach reader listeners (data / close / end / error)
+    if (this.socket) {
+      if (this.onData) this.socket.removeListener("data", this.onData);
+      if (this.onSocketClosed) this.socket.removeListener("close", this.onSocketClosed);
+      if (this.onSocketEnded) this.socket.removeListener("end", this.onSocketEnded);
+      if (this.onSocketError) this.socket.removeListener("error", this.onSocketError);
     }
+    this.onData = null;
+    this.onSocketClosed = null;
+    this.onSocketEnded = null;
+    this.onSocketError = null;
+    this.decoder = null;
 
     // Drop all pending sends
     this.rejectAllPending();
@@ -142,7 +209,7 @@ export class SocketTransport implements XacppTransport {
         payload,
       };
 
-      egress.sendAcked(JSON.stringify(envelope) + "\n").catch(() => {
+      egress.sendAcked(this.encodeEnvelope(envelope)).catch(() => {
         this.pending.delete(id);
         reject(XacppError.closed());
       });
@@ -166,7 +233,7 @@ export class SocketTransport implements XacppTransport {
     };
 
     try {
-      egress.sendFaf(JSON.stringify(envelope) + "\n");
+      egress.sendFaf(this.encodeEnvelope(envelope));
     } catch {
       this.pending.delete(id);
       throw XacppError.closed();
@@ -184,12 +251,31 @@ export class SocketTransport implements XacppTransport {
 
   // ---- Internal ----
 
-  private async onFrame(line: string): Promise<void> {
+  /** Serialize an envelope into a single-frame DATA_JSON transaction (SPEC §3/§4). */
+  private encodeEnvelope(envelope: XacppEnvelope): Uint8Array {
+    return encodeFrame(makeFrame(FrameType.DATA_JSON, textEncoder.encode(JSON.stringify(envelope))));
+  }
+
+  /** Process one decoded wire frame: DATA_JSON carries the envelope; transfer frames go to the wired session. */
+  private onWireFrame(frame: Frame): void {
+    if (frame.frameType === FrameType.DATA_JSON) {
+      // Any inbound frame proves the peer alive — refresh the silence clock.
+      this.transferHandlers?.onActivity();
+    } else if (this.transferHandlers) {
+      // Transfer channel: DATA_BINARY reassembly + control dispatch.
+      this.transferHandlers.onFrame(frame);
+      return;
+    } else {
+      // No transfer session wired: nothing to route non-envelope frames to.
+      console.debug("[xacpp:socket] ignoring frame type 0x%s", frame.frameType.toString(16));
+      return;
+    }
+
     let envelope: XacppEnvelope;
     try {
-      envelope = JSON.parse(line);
+      envelope = JSON.parse(textDecoder.decode(frame.payload));
     } catch {
-      console.warn("[xacpp:socket] failed to parse frame: %s", line);
+      console.warn("[xacpp:socket] failed to parse frame payload as envelope JSON");
       return;
     }
 
@@ -261,7 +347,7 @@ export class SocketTransport implements XacppTransport {
       return;
     }
     try {
-      await this.egress.sendAcked(JSON.stringify(envelope) + "\n");
+      await this.egress.sendAcked(this.encodeEnvelope(envelope));
     } catch (e) {
       console.warn("[xacpp:%s] failed to send response for request %s: %s", source, id, e instanceof Error ? e.message : String(e));
     }
@@ -269,10 +355,31 @@ export class SocketTransport implements XacppTransport {
 
   /** Cleanup on reader exit: connection dead — fail fast subsequent sends, drop pending waiters. */
   private onReaderGone(): void {
+    if (this.readerGone) return;
+    this.readerGone = true;
     this._connected = false;
     this.rejectAllPending();
     this.egress?.close();
     this.egress = null;
+  }
+
+  // ---- Transfer wiring (session attachment surface) ----
+
+  /** Write one encoded control frame through the ordered egress (scheduling priority). */
+  writeControlFrame(bytes: Uint8Array): void {
+    if (!this.egress) throw XacppError.notConnected();
+    this.egress.sendControl(bytes);
+  }
+
+  /** Write one data frame, encoded, through the ordered egress (fire-and-forget FIFO). */
+  writeDataFrame(frame: Frame): void {
+    if (!this.egress) throw XacppError.notConnected();
+    this.egress.sendFaf(encodeFrame(frame));
+  }
+
+  /** Register/unregister the transfer-session activity hooks. */
+  onTransferActivity(handlers: TransferActivityHandlers | null): void {
+    this.transferHandlers = handlers;
   }
 
   private rejectAllPending(): void {

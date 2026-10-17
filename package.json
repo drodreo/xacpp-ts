@@ -1,6 +1,6 @@
 {
   "name": "xacpp",
-  "version": "0.8.7",
+  "version": "1.0.0",
   "description": "Agent Control Plane Protocol — TypeScript implementation",
   "keywords": [
     "xacpp",
@@ -11,6 +11,9 @@
   ],
   "author": "drodreo",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.2.0"
+  },
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.mjs",
   "types": "./dist/esm/index.d.ts",
@@ -35,7 +38,8 @@
     "prepublishOnly": "rslib build",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.check.json --noEmit",
-    "bench:egress": "rslib build && node --experimental-strip-types examples/egress-bench.mts"
+    "bench:egress": "rslib build && node --experimental-strip-types examples/egress-bench.mts",
+    "bench:protocol": "rslib build && node --experimental-strip-types examples/bench-protocol.mts"
   },
   "packageManager": "pnpm@10.33.0",
   "devDependencies": {

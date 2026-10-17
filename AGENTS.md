@@ -4,7 +4,7 @@
 
 xacpp (Agent Control Plane Protocol) — TypeScript implementation.
 
-This is the TS counterpart of [xacpp-rs](https://github.com/drodreo/xacpp-rs). The two projects share identical wire protocol (JSONL envelope) and must stay in sync.
+This is the TS counterpart of [xacpp-rs](https://github.com/drodreo/xacpp-rs). The two projects share identical wire protocol (binary frames per `docs/SPEC.md`; envelope JSON travels in DATA_JSON frames) and must stay in sync.
 
 ## Architecture
 
@@ -27,7 +27,7 @@ Three-layer design, mirroring xacpp-rs:
 │  Does not know about specific business event types           │
 ├──────────────────────────────────────────────────────────────┤
 │  Underlying pipe (Stdio / TCP / WebSocket)                   │
-│  Raw byte stream, frame splitting (JSONL)                    │
+│  Raw byte stream, binary frame splitting (SPEC §3)           │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -49,10 +49,12 @@ Three-layer design, mirroring xacpp-rs:
 | `src/commands/index.ts` | `XacppCommand` union type |
 | `src/events/` | Event type definitions |
 | `src/egress.ts` | Ordered egress (single FIFO drain loop), `ClosedSignal` close broadcast, pending slot types |
-| `src/stdio-transport.ts` | Stdio transport (stdin/stdout JSONL) |
+| `src/stdio-transport.ts` | Stdio transport (stdin/stdout binary frames) |
 | `src/socket-transport.ts` | TCP transport (`net.Socket`, spawn-per-request concurrency) |
 
 ## Wire Protocol
+
+Wire framing follows `docs/SPEC.md` (binary frame format, protocol v1.0): every envelope is serialized to JSON and sent as a single-frame `DATA_JSON` transaction (`seq=0`, `total_len` = payload length, fresh `transaction_id`). The JSON below is the `DATA_JSON` payload.
 
 All wire messages are `XacppEnvelope` with `type` field routing:
 

@@ -20,9 +20,15 @@
  */
 
 import * as net from "node:net";
-import * as readline from "node:readline";
 
-import { SocketTransport, newActivityEvent, newEvent } from "../dist/esm/index.mjs";
+import {
+  FRAME_FIXED_OVERHEAD,
+  FrameDecoder,
+  FrameType,
+  SocketTransport,
+  newActivityEvent,
+  newEvent,
+} from "../dist/esm/index.mjs";
 
 /** Typical stream length captured in high-latency scenarios (batch-1 baseline). */
 const DEFAULT_N = 40_000;
@@ -40,11 +46,11 @@ function benchN(): number {
   return v;
 }
 
-/** Extract the event sequence number from a raw JSONL frame. */
-function frameSeq(line: string): number | null {
+/** Extract the event sequence number from a `DATA_JSON` frame payload (envelope JSON). */
+function frameSeq(envelopeJson: string): number | null {
   let v: Record<string, unknown>;
   try {
-    v = JSON.parse(line);
+    v = JSON.parse(envelopeJson);
   } catch {
     return null;
   }
@@ -76,19 +82,23 @@ function rawSeqPeer(expected: number): { port: number; collected: Promise<Collec
   });
 
   listener.on("connection", (socket: net.Socket) => {
-    const rl = readline.createInterface({ input: socket });
+    const decoder = new FrameDecoder();
+    const textDecoder = new TextDecoder();
     const seqs: number[] = [];
     let bytes = 0;
     collected = new Promise<Collected>((resolve) => {
-      rl.on("line", (line: string) => {
-        bytes += Buffer.byteLength(line) + 1; // + '\n'
-        const seq = frameSeq(line);
-        if (seq !== null) {
-          seqs.push(seq);
-          if (seqs.length >= expected) resolve({ seqs, bytes });
+      socket.on("data", (chunk: Buffer) => {
+        for (const frame of decoder.push(new Uint8Array(chunk))) {
+          bytes += FRAME_FIXED_OVERHEAD + frame.payload.length;
+          if (frame.frameType !== FrameType.DATA_JSON) continue;
+          const seq = frameSeq(textDecoder.decode(frame.payload));
+          if (seq !== null) {
+            seqs.push(seq);
+            if (seqs.length >= expected) resolve({ seqs, bytes });
+          }
         }
       });
-      rl.on("close", () => resolve({ seqs, bytes }));
+      socket.on("close", () => resolve({ seqs, bytes }));
     });
   });
 

@@ -12,8 +12,8 @@
 
 import { describe, it, expect } from "vitest";
 import * as net from "node:net";
-import * as readline from "node:readline";
 
+import { FrameDecoder, FrameType } from "../src/frame";
 import { genericResponse } from "../src/message";
 import type { XacppRequest } from "../src/message";
 import { newActivityEvent, newEvent } from "../src/events";
@@ -22,11 +22,11 @@ import type { RequestHandler } from "../src/transport";
 
 // ---- Helpers ----
 
-/** Extract the event sequence number from a raw JSONL frame. */
-function frameSeq(line: string): number | null {
+/** Extract the event sequence number from a DATA_JSON frame payload (envelope JSON). */
+function frameSeq(envelopeJson: string): number | null {
   let v: Record<string, unknown>;
   try {
-    v = JSON.parse(line);
+    v = JSON.parse(envelopeJson);
   } catch {
     return null;
   }
@@ -71,17 +71,21 @@ function rawSeqPeer(expected: number): RawPeer {
   });
 
   listener.on("connection", (socket: net.Socket) => {
-    const rl = readline.createInterface({ input: socket });
+    const decoder = new FrameDecoder();
+    const textDecoder = new TextDecoder();
     const seqs: number[] = [];
     collected = new Promise<number[]>((resolve) => {
-      rl.on("line", (line: string) => {
-        const seq = frameSeq(line);
-        if (seq !== null) {
-          seqs.push(seq);
-          if (seqs.length >= expected) resolve([...seqs]);
+      socket.on("data", (chunk: Buffer) => {
+        for (const frame of decoder.push(new Uint8Array(chunk))) {
+          if (frame.frameType !== FrameType.DATA_JSON) continue;
+          const seq = frameSeq(textDecoder.decode(frame.payload));
+          if (seq !== null) {
+            seqs.push(seq);
+            if (seqs.length >= expected) resolve([...seqs]);
+          }
         }
       });
-      rl.on("close", () => resolve([...seqs]));
+      socket.on("close", () => resolve([...seqs]));
     });
     connected?.();
   });

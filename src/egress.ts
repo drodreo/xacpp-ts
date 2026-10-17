@@ -16,7 +16,7 @@ import type { XacppResponse } from "./message";
 
 /** Minimal writer surface shared by socket and stdio transports. */
 export interface EgressWriter {
-  write(chunk: string, cb?: (err?: Error | null) => void): boolean;
+  write(chunk: string | Uint8Array, cb?: (err?: Error | null) => void): boolean;
   end(cb?: () => void): void;
 }
 
@@ -83,7 +83,18 @@ interface WriteAck {
 
 /** A queued outbound item. */
 type EgressItem =
-  | { kind: "frame"; frame: string; writeAck: WriteAck | null }
+  | {
+      kind: "frame";
+      bytes: Uint8Array;
+      writeAck: WriteAck | null;
+      /**
+       * Control frames take scheduling priority and interleave ahead of
+       * queued data frames (SPEC §5 performance invariant 4). Envelope
+       * (DATA_JSON) frames stay plain FIFO — their position is
+       * order-sensitive.
+       */
+      priority?: boolean;
+    }
   /** Graceful teardown: flush queued frames, end the writer, exit. */
   | { kind: "close" };
 
@@ -104,17 +115,28 @@ export class Egress {
   ) {}
 
   /** Enqueue a frame and wait for the write result. */
-  sendAcked(frame: string): Promise<void> {
+  sendAcked(bytes: Uint8Array): Promise<void> {
     if (!this.host.isConnected()) return Promise.reject(XacppError.notConnected());
     return new Promise<void>((resolve, reject) => {
-      this.enqueue({ kind: "frame", frame, writeAck: { resolve, reject } });
+      this.enqueue({ kind: "frame", bytes, writeAck: { resolve, reject } });
     });
   }
 
   /** Enqueue a frame without waiting for the write result (fire-and-forget). */
-  sendFaf(frame: string): void {
+  sendFaf(bytes: Uint8Array): void {
     if (!this.host.isConnected()) throw XacppError.notConnected();
-    this.enqueue({ kind: "frame", frame, writeAck: null });
+    this.enqueue({ kind: "frame", bytes, writeAck: null });
+  }
+
+  /**
+   * Enqueue a control frame with scheduling priority (fire-and-forget).
+   * The frame is written ahead of all queued data frames (DATA_JSON /
+   * DATA_BINARY) but never ahead of a pending graceful close. Throws =
+   * connection already known dead.
+   */
+  sendControl(bytes: Uint8Array): void {
+    if (!this.host.isConnected()) throw XacppError.notConnected();
+    this.enqueue({ kind: "frame", bytes, writeAck: null, priority: true });
   }
 
   /**
@@ -135,7 +157,14 @@ export class Egress {
 
   private enqueue(item: EgressItem): void {
     if (this.ended) return;
-    this.queue.push(item);
+    if (item.kind === "frame" && item.priority) {
+      // Interleave ahead of queued data frames; never ahead of a close item.
+      const idx = this.queue.findIndex((queued) => !(queued.kind === "frame" && queued.priority));
+      if (idx === -1) this.queue.push(item);
+      else this.queue.splice(idx, 0, item);
+    } else {
+      this.queue.push(item);
+    }
     this.pump();
   }
 
@@ -152,7 +181,7 @@ export class Egress {
         this.shutdownWriter();
         return;
       }
-      const failed = await this.writeFrame(item.frame);
+      const failed = await this.writeFrame(item.bytes);
       if (item.writeAck) {
         if (failed) item.writeAck.reject(XacppError.closed());
         else item.writeAck.resolve();
@@ -191,11 +220,11 @@ export class Egress {
     }
   }
 
-  /** Write one JSONL frame (payload with trailing newline). Resolves to true on error. */
-  private writeFrame(frame: string): Promise<boolean> {
+  /** Write one encoded binary frame to the wire. Resolves to true on error. */
+  private writeFrame(bytes: Uint8Array): Promise<boolean> {
     return new Promise((resolve) => {
       try {
-        this.writer.write(frame, (err) => resolve(err != null));
+        this.writer.write(bytes, (err) => resolve(err != null));
       } catch {
         resolve(true);
       }

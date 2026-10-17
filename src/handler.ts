@@ -59,7 +59,9 @@ export interface EstablishHandler {
   /**
    * Handle Establish request.
    *
-   * `transport` is passed in by Peer, for use inside `onEstablish` to create `XacppSession`.
+   * `transport` is passed in by Peer: construct a `XacppSession` inside
+   * `onEstablish`, bind the identity, and wire it to the transport to
+   * receive events/binary transfers for this session.
    * Returns an {@link EstablishDecision}:
    * - `challenge_required`: first-time connection, responder issues a challenge.
    * - `established`: credentials valid, direct establishment with sessionId and handler.

@@ -18,6 +18,8 @@ export interface TextPart {
   type: "text";
   text: string;
   partId?: string;
+  /** Content-part identity fact (x-agent LlmPartType variant name, camelCase); always present, "default" for unmarked parts. */
+  partType: string;
 }
 
 export interface ImagePart {
@@ -27,6 +29,8 @@ export interface ImagePart {
   width?: number;
   height?: number;
   partId?: string;
+  /** Content-part identity fact (x-agent LlmPartType variant name, camelCase); always present, "default" for unmarked parts. */
+  partType: string;
 }
 
 export interface AudioPart {
@@ -36,6 +40,8 @@ export interface AudioPart {
   channels?: number;
   durationMs?: number;
   partId?: string;
+  /** Content-part identity fact (x-agent LlmPartType variant name, camelCase); always present, "default" for unmarked parts. */
+  partType: string;
 }
 
 export interface VideoPart {
@@ -46,6 +52,8 @@ export interface VideoPart {
   width?: number;
   height?: number;
   partId?: string;
+  /** Content-part identity fact (x-agent LlmPartType variant name, camelCase); always present, "default" for unmarked parts. */
+  partType: string;
 }
 
 /** File content part. */
@@ -53,6 +61,8 @@ export interface FilePart {
   type: "file";
   source: FileRef;
   partId?: string;
+  /** Content-part identity fact (x-agent LlmPartType variant name, camelCase); always present, "default" for unmarked parts. */
+  partType: string;
 }
 
 /** 统一多模态内容分片。 */
