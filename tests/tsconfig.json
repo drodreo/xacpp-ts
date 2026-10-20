@@ -1,0 +1,5 @@
+{
+  "//": "Editor/IDE config for the test tree. The root tsconfig.json only covers src/ (build-facing: rootDir/outDir/declaration), so editors (VSCode tsserver) otherwise fall back to an inferred project for tests — missing node types etc. This config pins tests to the same strict checking surface as tsconfig.check.json.",
+  "extends": "../tsconfig.check.json",
+  "include": ["./**/*.ts"]
+}

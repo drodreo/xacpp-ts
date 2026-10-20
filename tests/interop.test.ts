@@ -5,9 +5,10 @@
  * echo, event counting on stderr, binary echo, reliability session per
  * connection with SPEC §5 default timings — heartbeats 30 s, silence 90 s).
  *
- * The binary location comes from `XACPP_INTEROP_BIN` (default: the rs
- * working tree's debug example). When the binary is missing or not
- * executable the whole suite skips — a prepared environment has it built.
+ * The binary location comes from `XACPP_INTEROP_BIN` (default: a
+ * side-by-side `xacpp-rs` checkout's debug example build). When the
+ * binary is missing or not executable the whole suite skips — a prepared
+ * environment has it built.
  *
  * Scenarios (mission matrix):
  *   a. lifecycle — negotiate/establish/establish_confirm + generic command
@@ -32,20 +33,30 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import * as readline from "node:readline";
 
-import { SocketTransport } from "../src/socket-transport";
+import { SocketTransport } from "../src/carrier/socket";
 import { TransferSession } from "../src/transfer";
-import { FrameDecoder, FrameType, encodeFrame, makeFrame } from "../src/frame";
-import type { Frame } from "../src/frame";
-import { genericCommand } from "../src/commands";
-import { acknowledge } from "../src/message";
-import type { Capabilities } from "../src/capability";
-import { newActivityEvent, newEvent } from "../src/events";
-import type { RequestHandler } from "../src/transport";
+import { XacppPeer } from "../src/session/peer";
+import { XacppSession } from "../src/session/session";
+import { createHash } from "node:crypto";
+import { FrameDecoder, FrameType, encodeFrame, makeFrame, newTransactionId } from "../src/wire/frame";
+import type { Frame } from "../src/wire/frame";
+import { genericCommand } from "../src/wire/commands";
+import type { XacppCommand } from "../src/wire/commands";
+import { acknowledge } from "../src/wire/message";
+import type { XacppResponse } from "../src/wire/message";
+import type { Capabilities } from "../src/wire/capability";
+import { newActivityEvent, newEvent } from "../src/wire/events";
+import type { RequestHandler } from "../src/carrier/transport";
 
 // ---- Peer binary plumbing ----
 
-const DEFAULT_INTEROP_BIN =
-  "<xacpp-rs-1.0>/target/debug/examples/interop_peer";
+// The rs interop peer binary: override with XACPP_INTEROP_BIN, or build it
+// from a side-by-side xacpp-rs checkout (`cargo build --example
+// interop_peer`). Tests skip when the binary is absent.
+const DEFAULT_INTEROP_BIN = new URL(
+  "../../xacpp-rs/target/debug/examples/interop_peer",
+  import.meta.url,
+).pathname;
 const INTEROP_BIN = process.env.XACPP_INTEROP_BIN ?? DEFAULT_INTEROP_BIN;
 
 const BIN_AVAILABLE = (() => {
@@ -340,9 +351,12 @@ describe.skipIf(!BIN_AVAILABLE)("xacpp interop — xacpp-ts client ↔ xacpp-rs 
     await client.disconnect();
   }, 60_000);
 
-  // d. retransmit across reconnect: interrupted mid-flight, same session on
-  // a fresh transport completes the transfer bit-exact.
-  it("d_retransmit_across_reconnect_completes_bit_exact", async () => {
+  // d. reconnect after a fully delivered but UNCONFIRMED transaction: the
+  // receiver consumed the slot (no tombstones — it cannot distinguish
+  // "completed" from "never seen"), so the declaration adjudicates Unknown
+  // and the holder fails the transfer as a whole (completion remains
+  // final-ACK-only: unconfirmed, never a false confirmation).
+  it("d_reconnect_with_lost_final_ack_fails_unconfirmed_no_tombstone", async () => {
     const senderSession = new TransferSession({
       sender: { workingFrameBytes: 256 * 1024, initialTimeoutMs: 300, maxTimeoutMs: 5_000 },
     });
@@ -363,15 +377,16 @@ describe.skipIf(!BIN_AVAILABLE)("xacpp interop — xacpp-ts client ↔ xacpp-rs 
     expect(completions, "no confirmation before reconnect").toHaveLength(0);
     expect(senderSession.copyCount).toBeGreaterThan(0); // unconfirmed copy retained
 
-    // Same session wired into a fresh transport: the retained copy
-    // finishes the job (RTO-driven retransmission + peer-side reassembly/NACK feedback).
+    // Same session wired into a fresh transport: the holder declares, the
+    // peer no longer holds the slot (delivered = consumed), the verdict is
+    // Unknown, and the copy is released with an unconfirmed completion.
     const client2 = SocketTransport.connectTo(peer.port, "127.0.0.1");
     client2.onRequest(ackHandler);
     await client2.connect();
     senderSession.wire(client2);
 
     await waitFor(() => completions.length === 1, "completion after reconnect", 30_000);
-    expect(completions[0]).toEqual({ transactionId: txid, confirmed: true });
+    expect(completions[0]).toEqual({ transactionId: txid, confirmed: false });
     expect(senderSession.copyCount).toBe(0);
 
     await client2.disconnect();
@@ -408,7 +423,7 @@ describe.skipIf(!BIN_AVAILABLE)("xacpp interop — xacpp-ts client ↔ xacpp-rs 
     const proxy = await startTeeProxy(peer.port);
     // Injection: unaligned garbage (no magic — decoder skips it), then a
     // fully valid unknown-type frame (CRC correct — decoded and ignored,
-    // SPEC §8), then more garbage. None of it may kill or derail the peer.
+    // SPEC §9), then more garbage. None of it may kill or derail the peer.
     const garbage1 = Buffer.from("hello there, no magic in here\n\r\x00\x01\x02");
     const unknownFrame = encodeFrame(makeFrame(0x7fff, pattern(48)));
     const garbage2 = Buffer.alloc(64, 0xee);
@@ -445,3 +460,191 @@ describe.skipIf(!BIN_AVAILABLE)("xacpp interop — xacpp-ts client ↔ xacpp-rs 
     }
   }, 30_000);
 });
+
+// ---- Fetch channel interop (SPEC §8) ----
+//
+// PENDING 联调: the rs side of the fetch channel is being implemented in
+// parallel (worktree: xacpp-rs-fetch). These cases assume the rs
+// `interop_peer` example gains two fetch modes (proposed contract — adjust
+// at联调 time if the rs side lands differently):
+//   --fetch-serve <dir> : answer fetch(uri) with the bytes of <dir>/<uri>
+//                         (mime "application/octet-stream");
+//   --fetch-pull <uri>  : after the ts side establishes, the peer issues
+//                         fetch(uri) back and prints
+//                         `FETCHED uri=<uri> sha256=<hex> bytes=<n>` on stderr.
+// The binary keeps the READY port=N stderr convention. Point
+// XACPP_INTEROP_FETCH_BIN at a fetch-capable build; the suite skips
+// otherwise.
+
+const INTEROP_FETCH_BIN = process.env.XACPP_INTEROP_FETCH_BIN;
+const FETCH_BIN_AVAILABLE = (() => {
+  if (!INTEROP_FETCH_BIN) return false;
+  try {
+    fs.accessSync(INTEROP_FETCH_BIN, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+function sha256Hex(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** Full Peer+Session client stack (fetch needs the session layer, not just a transfer). */
+async function connectFetchStack(
+  port: number,
+  onCommandOverride?: (command: XacppCommand) => Promise<XacppResponse>,
+): Promise<{
+  transport: SocketTransport;
+  session: XacppSession;
+}> {
+  const transport = SocketTransport.connectTo(port, "127.0.0.1");
+  const session = new XacppSession();
+  const peer = new XacppPeer(
+    INTEROP_CAPS,
+    transport,
+    { onNegotiate: async () => {} },
+    {
+      onEstablish: async () => {
+        throw new Error("client side never accepts establish");
+      },
+      onEstablishConfirm: async () => {
+        throw new Error("unused");
+      },
+    },
+    session,
+  );
+  await peer.connect();
+  await peer.negotiate();
+  await peer.establish(
+    undefined,
+    {
+      // Hand-rolled serving exists only when an override is supplied.
+      isFetchResponder: onCommandOverride !== undefined,
+      onCommand: async (command) => {
+        if (onCommandOverride) return onCommandOverride(command);
+        return acknowledge();
+      },
+      onEvent: async () => acknowledge(),
+    },
+    () => {
+      throw new Error("challenge path not used");
+    },
+  );
+  return { transport, session };
+}
+
+describe.skipIf(!FETCH_BIN_AVAILABLE)("fetch kernel interop — xacpp-ts ↔ xacpp-rs (PENDING 联调)", () => {
+  // rs requests nothing here; it SERVES: ts pulls a fixture file from rs.
+  // Stateless kernel: fetch() resolves with the declared metadata only;
+  // the bytes are claimed through the stream receive path by txid.
+  it("g_ts_fetches_from_rs_serving_peer", async () => {
+    const fixtureDir = fs.mkdtempSync("/tmp/xacpp-fetch-interop-");
+    const payload = pattern(3 * 1024 * 1024 + 91); // multi-frame + irregular tail
+    fs.writeFileSync(`${fixtureDir}/fixture.bin`, payload);
+
+    const serving = await spawnFetchPeer(["--fetch-serve", fixtureDir]);
+    try {
+      const { transport, session } = await connectFetchStack(serving.port);
+      const claims = new Map<string, { chunks: Uint8Array[]; ends: string[] }>();
+      session.onBinaryStream((stream) => {
+        const claim = { chunks: [] as Uint8Array[], ends: [] as string[] };
+        claims.set(stream.transactionId, claim);
+        stream.onChunk((chunk) => claim.chunks.push(chunk));
+        stream.onEnd((reason) => claim.ends.push(reason));
+      });
+
+      const ready = await session.fetch("fixture.bin");
+      expect(ready.sha256).toBe(sha256Hex(payload));
+      expect(ready.sizeBytes).toBe(payload.length);
+
+      await waitFor(() => claims.get(ready.txid)?.ends.includes("completed") === true, "stream completes", 30_000);
+      const claim = claims.get(ready.txid)!;
+      expect(Buffer.concat(claim.chunks.map((c) => Buffer.from(c)))).toEqual(Buffer.from(payload));
+      await transport.disconnect();
+    } finally {
+      await serving.kill();
+      fs.rmSync(fixtureDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  // ts SERVES: rs pulls a resource from the ts session's consumer handler,
+  // which answers fetch_ready and streams the bytes with the SAME txid
+  // (SPEC §8.1/§8.2) through openBinarySink.
+  it("h_rs_fetches_from_ts_serving_session", async () => {
+    const payload = pattern(1024 * 1024 + 7);
+    const pulling = await spawnFetchPeer(["--fetch-pull", "res:fixture"]);
+    try {
+      const { transport, session } = await connectFetchStack(pulling.port, async (command) => {
+        if (typeof command === "object" && "fetch" in command) {
+          return serveInteropFetch(session, payload);
+        }
+        return acknowledge();
+      });
+      await waitFor(
+        () =>
+          pulling
+            .stderrLines()
+            .some((l) => l.startsWith("FETCHED uri=res:fixture ") && l.includes(`sha256=${sha256Hex(payload)}`) && l.includes(`bytes=${payload.length}`)),
+        "rs peer fetched the ts-served resource",
+        30_000,
+      );
+      await transport.disconnect();
+    } finally {
+      await pulling.kill();
+    }
+  }, 60_000);
+});
+
+/** Answer a fetch command with fetch_ready + a same-txid binary stream (SPEC §8.1). */
+async function serveInteropFetch(session: XacppSession, payload: Uint8Array): Promise<XacppResponse> {
+  const txid = newTransactionId();
+  const sink = session.openBinarySink({ totalLen: payload.length }, txid);
+  // SPEC §8.4: complete the fetch_ready response before the binary frames —
+  // defer the stream one macrotask past the response write.
+  setImmediate(() => {
+    void sink
+      .write(payload)
+      .then(() => sink.finish())
+      .catch(() => {});
+  });
+  return { kind: "fetch_ready", txid, sha256: sha256Hex(payload), sizeBytes: payload.length, mime: "application/octet-stream" };
+}
+
+/** spawnPeer variant carrying extra argv (fetch modes) before --port. */
+async function spawnFetchPeer(extraArgs: string[]): Promise<PeerProcess> {
+  const child = spawn(INTEROP_FETCH_BIN!, [...extraArgs, "--port", "0"], { stdio: ["ignore", "ignore", "pipe"] });
+  child.stderr!.setEncoding("utf8");
+  const lines: string[] = [];
+  const port = await new Promise<number>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`fetch interop_peer READY timeout (stderr so far: ${lines.join(" | ")})`)), 10_000);
+    const lineReader = readline.createInterface({ input: child.stderr! });
+    lineReader.on("line", (line: string) => {
+      lines.push(line);
+      const m = /READY port=(\d+)/.exec(line);
+      if (m) {
+        clearTimeout(timer);
+        resolve(Number(m[1]));
+      }
+    });
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      reject(new Error(`fetch interop_peer exited early with code ${code}`));
+    });
+  });
+  let killed = false;
+  return {
+    port,
+    stderrLines: () => lines.slice(),
+    kill: async () => {
+      if (killed || child.exitCode !== null) return;
+      killed = true;
+      const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      child.kill("SIGTERM");
+      const gone = await Promise.race([exited.then(() => true), new Promise<false>((r) => setTimeout(() => r(false), 500))]);
+      if (!gone && child.exitCode === null) child.kill("SIGKILL");
+      await Promise.race([exited, new Promise<void>((r) => setTimeout(r, 2_000))]);
+    },
+  };
+}

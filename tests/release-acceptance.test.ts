@@ -23,8 +23,8 @@ import { describe, it, expect } from "vitest";
 import * as net from "node:net";
 import { PassThrough } from "node:stream";
 
-import { SocketTransport } from "../src/socket-transport";
-import { StdioTransport } from "../src/stdio-transport";
+import { SocketTransport } from "../src/carrier/socket";
+import { StdioTransport } from "../src/carrier/stdio";
 import { TransferSession } from "../src/transfer";
 import {
   FrameDecoder,
@@ -38,16 +38,16 @@ import {
   encodeFrame,
   makeFrame,
   newTransactionId,
-} from "../src/frame";
-import type { Frame } from "../src/frame";
-import { encodeAck } from "../src/control";
-import { newActivityEvent, newEvent } from "../src/events";
-import { genericCommand } from "../src/commands";
-import { acknowledge, genericResponse, XacppError } from "../src/message";
-import type { XacppEnvelope, XacppRequest, XacppResponse } from "../src/message";
-import type { Capabilities } from "../src/capability";
-import type { RequestHandler } from "../src/transport";
-import type { SenderOptions } from "../src/transaction";
+} from "../src/wire/frame";
+import type { Frame } from "../src/wire/frame";
+import { encodeAck } from "../src/wire/control";
+import { newActivityEvent, newEvent } from "../src/wire/events";
+import { genericCommand } from "../src/wire/commands";
+import { acknowledge, genericResponse, XacppError } from "../src/wire/message";
+import type { XacppEnvelope, XacppRequest, XacppResponse } from "../src/wire/message";
+import type { Capabilities } from "../src/wire/capability";
+import type { RequestHandler } from "../src/carrier/transport";
+import type { SenderOptions } from "../src/reliability/transaction";
 
 // =====================================================================================
 // Shared helpers
@@ -784,7 +784,6 @@ describe("B — extreme scenarios", () => {
         backpressureCapBytes: 4096,
         initialTimeoutMs: 2 ** 40,
         maxTimeoutMs: 2 ** 41,
-        copyRetentionMs: 2 ** 42,
       },
       heartbeatIntervalMs: 30_000,
       silenceTimeoutMs: 2 ** 40,
@@ -891,7 +890,7 @@ describe("C — error-semantics ledger", () => {
     rig.cleanup();
   });
 
-  it("c_duplicate_binary_frames_delivered_once_wire", async () => {
+  it("c_duplicate_binary_frames_idempotent_incomplete_wire", async () => {
     const delivered: { transactionId: string; payload: Uint8Array }[] = [];
     const session = new TransferSession();
     session.onBinary = (transactionId, payload) => delivered.push({ transactionId, payload });
@@ -924,16 +923,9 @@ describe("C — error-semantics ledger", () => {
     await waitFor(() => rig.rx.some((f) => f.frameType === FrameType.ACK), "final ACK visible on the wire");
     expect(rig.isServerClosed()).toBe(false);
 
-    // A full replay of the *completed* transaction is indistinguishable from
-    // a fresh transfer sharing the txid: it reassembles and delivers again,
-    // the connection survives, and no phantom partial delivery appears first.
-    rig.write(seq0);
-    await settle(20);
-    expect(delivered, "no phantom partial delivery from the replay").toHaveLength(1);
-    rig.write(seq1);
-    await waitFor(() => delivered.length === 2, "replay of completed transaction reassembles again");
-    expect(Buffer.from(delivered[1].payload).equals(Buffer.from(body))).toBe(true);
-    expect(rig.isServerClosed()).toBe(false);
+    // The completed-transaction replay guard lives at the fetch extension
+    // layer (ext-fetch contract matrix 10): the bare kernel surface makes
+    // no terminal-replay promise (SPEC §8.4).
 
     rig.cleanup();
   });

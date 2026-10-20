@@ -14,8 +14,8 @@
 
 import { describe, it, expect, vi } from "vitest";
 
-import { FrameDecoder, FrameType, makeFrame } from "../src/frame";
-import type { Frame } from "../src/frame";
+import { FrameDecoder, FrameType, makeFrame } from "../src/wire/frame";
+import type { Frame } from "../src/wire/frame";
 import {
   decodeAck,
   decodeError,
@@ -23,10 +23,11 @@ import {
   decodeNack,
   decodeResumeResponse,
   encodeError,
+  encodeResumeRequest,
   encodeResumeResponse,
   ErrorCode,
   RESUME_STATUS,
-} from "../src/control";
+} from "../src/wire/control";
 import { TransferSession } from "../src/transfer";
 import type { BinarySendResult } from "../src/transfer";
 
@@ -84,7 +85,7 @@ function feed(receiver: TransferSession, frames: Frame[], now: number): Uint8Arr
 }
 
 /** Long-but-benign timers so timeout retransmission never interferes. */
-const QUIET_SENDER = { initialTimeoutMs: 1_000_000, copyRetentionMs: 1_000_000_000 };
+const QUIET_SENDER = { initialTimeoutMs: 1_000_000 };
 
 /** Find the first frame of the given type among encoded control frames. */
 function controlOf(frames: Uint8Array[], frameType: number): Frame {
@@ -167,7 +168,6 @@ describe("TransferSession — loss recovery", () => {
         workingFrameBytes: 100,
         initialTimeoutMs: 2_000,
         maxTimeoutMs: 30_000,
-        copyRetentionMs: 1_000_000_000,
       },
     });
     const { frames } = sender.openSend(filler(300), 0); // opened at t=0
@@ -223,7 +223,7 @@ describe("TransferSession — incremental ACK batching", () => {
 });
 
 describe("TransferSession — RESUME across connections", () => {
-  it("receiver resumes an incomplete receive on a new connection and completes bit-exact", () => {
+  it("the holder declares, the receiver adjudicates, and the verdict resumes the transfer bit-exact", () => {
     const completions: BinarySendResult[] = [];
     const sender = new TransferSession({ sender: { ...QUIET_SENDER, workingFrameBytes: 100 } });
     const { session: receiver, delivered } = receivingSession();
@@ -235,30 +235,213 @@ describe("TransferSession — RESUME across connections", () => {
     receiver.acceptDataFrame(frames[0], 1);
     receiver.onConnectionGone();
 
-    // Connection 2: the receiver auto-resumes on connect.
-    const resumeBytes = receiver.buildResumeFrame(2);
-    expect(resumeBytes).not.toBeNull();
-    const resumeFrame = decodeControl(resumeBytes!);
-    expect(resumeFrame.frameType).toBe(FrameType.RESUME);
+    // Connection 2: the holder declares its pending sends on wire-up.
+    const declarationBytes = sender.buildResumeDeclaration(2);
+    expect(declarationBytes).not.toBeNull();
+    const declaration = decodeControl(declarationBytes!);
+    expect(declaration.frameType).toBe(FrameType.RESUME);
 
-    // Holder answers `resumed`, then retransmits everything above the frontier.
-    // The answer rides a RESUME_RESPONSE frame (SPEC §5 pairing).
-    const outcome = sender.onControlFrame(resumeFrame, 3);
-    expect(outcome.controlFrames).toHaveLength(1);
-    const responseFrame = decodeControl(outcome.controlFrames[0]);
+    // The declaration gates the copy: no blind retransmission before the
+    // verdict (the retransmission clock skips gated copies).
+    expect(sender.tick(1_000_000).dataFrames).toEqual([]);
+
+    // The receiver adjudicates: the txid is still open → `Resumed` (the
+    // resume instruction); the answer rides a RESUME_RESPONSE frame.
+    const answer = receiver.onControlFrame(declaration, 3);
+    expect(answer.dataFrames).toEqual([]);
+    expect(answer.controlFrames).toHaveLength(1);
+    const responseFrame = decodeControl(answer.controlFrames[0]);
     expect(responseFrame.frameType).toBe(FrameType.RESUME_RESPONSE);
     const response = decodeResumeResponse(responseFrame.payload);
     expect(response).toEqual([{ transactionId, status: RESUME_STATUS.Resumed }]);
-    expect(outcome.dataFrames).toEqual([frames[1], frames[2]]);
+
+    // The verdict lifts the gate and retransmits every unconfirmed frame
+    // (frame 0's ACK never arrived — it retransmits and is absorbed
+    // idempotently by the receiver's incomplete window).
+    const outcome = sender.onControlFrame(responseFrame, 4);
+    expect(outcome.controlFrames).toEqual([]);
+    expect(outcome.dataFrames).toEqual(frames);
 
     // Retransmission completes the receive; the final ACK confirms on the sender.
-    const acks = feed(receiver, outcome.dataFrames, 4);
+    const acks = feed(receiver, outcome.dataFrames, 5);
     expect(delivered).toHaveLength(1);
     expectBytesEqual(delivered[0].payload, payload);
-    expect(sender.onControlFrame(decodeControl(acks[0]), 5).dataFrames).toEqual([]);
+    expect(sender.onControlFrame(decodeControl(acks[0]), 6).dataFrames).toEqual([]);
     expect(sender.copyCount).toBe(0);
     expect(completions).toEqual([{ transactionId, confirmed: true }]);
   });
+
+  it("a receiver `unknown` verdict fails the transfer: copy released, completion unconfirmed", () => {
+    const completions: BinarySendResult[] = [];
+    const sender = new TransferSession({ sender: { ...QUIET_SENDER, workingFrameBytes: 100 } });
+    const { transactionId, frames } = sender.openSend(filler(300), 0, (r) => completions.push(r));
+    expect(frames).toHaveLength(3);
+
+    const unknown = makeFrame(
+      FrameType.RESUME_RESPONSE,
+      encodeResumeResponse([{ transactionId, status: RESUME_STATUS.Unknown }]),
+    );
+    const outcome = sender.onControlFrame(unknown, 1);
+
+    expect(sender.copyCount).toBe(0);
+    expect(completions).toEqual([{ transactionId, confirmed: false }]);
+    expect(outcome.controlFrames).toEqual([]);
+  });
+
+  it("an empty pending set declares nothing on wire-up", () => {
+    const sender = new TransferSession({ sender: { ...QUIET_SENDER, workingFrameBytes: 100 } });
+    expect(sender.buildResumeDeclaration(1)).toBeNull();
+  });
+
+describe("TransferSession — recovery adjudication (receiver side)", () => {
+  it("adjudicates each declared txid against its open slots", () => {
+    const { session: receiver } = receivingSession();
+    const sender = new TransferSession({ sender: { ...QUIET_SENDER, workingFrameBytes: 100 } });
+    const { transactionId, frames } = sender.openSend(filler(300), 0);
+    receiver.acceptDataFrame(frames[0], 1); // open, incomplete
+    const stranger = "ab".repeat(16);
+
+    const outcome = receiver.onControlFrame(
+      makeFrame(
+        FrameType.RESUME,
+        encodeResumeRequest([
+          { transactionId, highestContiguousSeq: 0, receivedFrames: 1 },
+          { transactionId: stranger, highestContiguousSeq: 0, receivedFrames: 1 },
+        ]),
+      ),
+      2,
+    );
+    expect(outcome.dataFrames).toEqual([]);
+    const resp = decodeResumeResponse(decodeControl(outcome.controlFrames[0]).payload);
+    expect(resp).toEqual([
+      { transactionId, status: RESUME_STATUS.Resumed },
+      { transactionId: stranger, status: RESUME_STATUS.Unknown },
+    ]);
+    expect(receiver.pendingCount).toBe(1); // the declared slot is untouched
+  });
+
+  it("cancels an open-but-undeclared slot (the holder no longer holds it)", () => {
+    const { session: receiver } = receivingSession();
+    const sender = new TransferSession({ sender: { ...QUIET_SENDER, workingFrameBytes: 100 } });
+    const { transactionId, frames } = sender.openSend(filler(300), 0);
+    receiver.acceptDataFrame(frames[0], 1);
+    expect(receiver.pendingCount).toBe(1);
+
+    // The holder's declaration covers an unrelated transaction only.
+    const stranger = "ab".repeat(16);
+    const outcome = receiver.onControlFrame(
+      makeFrame(
+        FrameType.RESUME,
+        encodeResumeRequest([{ transactionId: stranger, highestContiguousSeq: 0, receivedFrames: 1 }]),
+      ),
+      2,
+    );
+    const resp = decodeResumeResponse(decodeControl(outcome.controlFrames[0]).payload);
+    expect(resp).toEqual([{ transactionId: stranger, status: RESUME_STATUS.Unknown }]);
+    expect(receiver.pendingCount).toBe(0); // the orphaned slot is cross-checked out
+    expect(transactionId).not.toBe(stranger);
+  });
+
+  it("answers every declaration exactly once; a repeated declaration disturbs nothing", () => {
+    const { session: receiver, delivered } = receivingSession();
+    const sender = new TransferSession({ sender: { ...QUIET_SENDER, workingFrameBytes: 100 } });
+    const { transactionId, frames } = sender.openSend(filler(300), 0);
+    receiver.acceptDataFrame(frames[0], 1);
+
+    const declare = () =>
+      makeFrame(
+        FrameType.RESUME,
+        encodeResumeRequest([{ transactionId, highestContiguousSeq: 0, receivedFrames: 1 }]),
+      );
+    for (const now of [2, 3]) {
+      const outcome = receiver.onControlFrame(declare(), now);
+      expect(outcome.controlFrames).toHaveLength(1); // never silently swallowed
+      expect(decodeResumeResponse(decodeControl(outcome.controlFrames[0]).payload)).toEqual([
+        { transactionId, status: RESUME_STATUS.Resumed },
+      ]);
+    }
+    expect(receiver.pendingCount).toBe(1); // declared slot undisturbed
+
+    // The transaction completes normally afterwards.
+    feed(receiver, [frames[1], frames[2]], 4);
+    expect(delivered).toHaveLength(1);
+    expectBytesEqual(delivered[0].payload, filler(300));
+  });
+
+  it("an empty declaration is not answered", () => {
+    const { session: receiver } = receivingSession();
+    const outcome = receiver.onControlFrame(makeFrame(FrameType.RESUME, encodeResumeRequest([])), 1);
+    expect(outcome.controlFrames).toEqual([]);
+    expect(outcome.dataFrames).toEqual([]);
+  });
+
+  it("a completed-but-undelivered slot survives the cross-check (it needs nothing from the holder)", () => {
+    const receiver = new TransferSession(); // no handler: delivery is pending
+    const sender = new TransferSession({ sender: { ...QUIET_SENDER, workingFrameBytes: 100 } });
+    const { frames } = sender.openSend(filler(300), 0);
+    feed(receiver, frames, 1); // complete, but undelivered (no onBinary)
+    expect(receiver.pendingCount).toBe(1);
+
+    const stranger = "ab".repeat(16);
+    const outcome = receiver.onControlFrame(
+      makeFrame(
+        FrameType.RESUME,
+        encodeResumeRequest([{ transactionId: stranger, highestContiguousSeq: 0, receivedFrames: 1 }]),
+      ),
+      2,
+    );
+    expect(decodeResumeResponse(decodeControl(outcome.controlFrames[0]).payload)).toEqual([
+      { transactionId: stranger, status: RESUME_STATUS.Unknown },
+    ]);
+    expect(receiver.pendingCount).toBe(1); // complete slots are NOT cross-checked out
+  });
+
+  it("both directions reconcile independently over crossed declarations", () => {
+    const a = new TransferSession({ sender: { ...QUIET_SENDER, workingFrameBytes: 100 } });
+    const b = new TransferSession({ sender: { ...QUIET_SENDER, workingFrameBytes: 100 } });
+    const deliveredA: Delivered[] = [];
+    const deliveredB: Delivered[] = [];
+    a.onBinary = (transactionId, payload) => deliveredA.push({ transactionId, payload });
+    b.onBinary = (transactionId, payload) => deliveredB.push({ transactionId, payload });
+    const completionsA: BinarySendResult[] = [];
+    const completionsB: BinarySendResult[] = [];
+
+    const txnAB = a.openSend(filler(300), 0, (r) => completionsA.push(r)); // a → b
+    const txnBA = b.openSend(filler(200, 7), 0, (r) => completionsB.push(r)); // b → a
+    b.acceptDataFrame(txnAB.frames[0], 1); // b holds a partial slot
+    a.acceptDataFrame(txnBA.frames[0], 1); // a holds a partial slot
+
+    // Both declare their own pending sends (wire-up on the new connection).
+    const declareA = decodeControl(a.buildResumeDeclaration(2)!);
+    const declareB = decodeControl(b.buildResumeDeclaration(2)!);
+
+    // Crossed adjudication: each answers the peer's declaration.
+    const answerB = b.onControlFrame(declareA, 3);
+    const answerA = a.onControlFrame(declareB, 3);
+    expect(decodeResumeResponse(decodeControl(answerB.controlFrames[0]).payload)).toEqual([
+      { transactionId: txnAB.transactionId, status: RESUME_STATUS.Resumed },
+    ]);
+    expect(decodeResumeResponse(decodeControl(answerA.controlFrames[0]).payload)).toEqual([
+      { transactionId: txnBA.transactionId, status: RESUME_STATUS.Resumed },
+    ]);
+
+    // Verdicts applied: gates lift, every unconfirmed frame retransmits.
+    const outcomeA = a.onControlFrame(decodeControl(answerB.controlFrames[0]), 4);
+    const outcomeB = b.onControlFrame(decodeControl(answerA.controlFrames[0]), 4);
+    expect(outcomeA.dataFrames).toEqual(txnAB.frames);
+    expect(outcomeB.dataFrames).toEqual(txnBA.frames);
+
+    // Both transfers complete bit-exact; the final ACKs confirm both.
+    const acksB = feed(b, outcomeA.dataFrames, 5);
+    const acksA = feed(a, outcomeB.dataFrames, 5);
+    expectBytesEqual(deliveredB[0].payload, filler(300));
+    expectBytesEqual(deliveredA[0].payload, filler(200, 7));
+    a.onControlFrame(decodeControl(acksB[0]), 6);
+    b.onControlFrame(decodeControl(acksA[0]), 6);
+    expect(completionsA).toEqual([{ transactionId: txnAB.transactionId, confirmed: true }]);
+    expect(completionsB).toEqual([{ transactionId: txnBA.transactionId, confirmed: true }]);
+  });
+});
 
   it("a peer RESUME rejection (RESUME_RESPONSE frame) releases the copy and reports unconfirmed", () => {
     const completions: BinarySendResult[] = [];
@@ -277,22 +460,26 @@ describe("TransferSession — RESUME across connections", () => {
     expect(outcome.controlFrames).toEqual([]);
   });
 
-  it("a RESUME_RESPONSE with `resumed` keeps the copy and the retransmission schedule", () => {
+  it("a RESUME_RESPONSE with `resumed` lifts the gate, retransmits at once, and rearms the schedule", () => {
     const completions: BinarySendResult[] = [];
     const sender = new TransferSession({
-      sender: { workingFrameBytes: 100, initialTimeoutMs: 2_000, copyRetentionMs: 1_000_000_000 },
+      sender: { workingFrameBytes: 100, initialTimeoutMs: 2_000 },
     });
     const { transactionId, frames } = sender.openSend(filler(300), 0, (r) => completions.push(r));
 
+    // Wire-up gates the copy; the verdict is the sole retransmission trigger.
+    sender.buildResumeDeclaration(1);
     const resumed = makeFrame(
       FrameType.RESUME_RESPONSE,
       encodeResumeResponse([{ transactionId, status: RESUME_STATUS.Resumed }]),
     );
-    sender.onControlFrame(resumed, 1);
+    const outcome = sender.onControlFrame(resumed, 2);
+    expect(outcome.dataFrames).toEqual(frames); // every unconfirmed frame
     expect(sender.copyCount).toBe(1);
     expect(completions).toEqual([]);
-    // The copy is still scheduled: the timeout sweep retransmits.
-    expect(sender.tick(3_000).dataFrames).toEqual(frames);
+    // The retransmission window rearmed at the verdict.
+    expect(sender.tick(2 + 1_999).dataFrames).toEqual([]);
+    expect(sender.tick(2 + 2_000).dataFrames).toEqual(frames);
   });
 
   it("dispatch is frame-type driven: a RESUME_RESPONSE payload on a RESUME frame is rejected, never guessed", () => {

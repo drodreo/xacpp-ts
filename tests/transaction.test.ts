@@ -8,14 +8,16 @@
  * 3. Timeout retransmission: initial window, ×2 exponential backoff, cap
  * 4. NACK-driven immediate retransmission lists (dedup, out-of-range ignored)
  * 5. Backpressure: paused above the cap, recovers when ACKs bring usage back
- * 6. RESUME holder queries: resumed / rejected (expired) / unknown
- * 7. Copy retention expiry, tombstones, and release on peer RESUME rejection
+ * 6. Recovery discipline (holder side): reconnect declaration gates
+ *    pending copies; verdicts lift the gate + retransmit (resumed) or
+ *    fail the transfer (unknown/rejected); no retention ceiling (copy
+ *    lifetime == transaction lifetime, SPEC §5 v3)
  */
 
 import { describe, it, expect } from "vitest";
-import { FrameType, encodeFrame, FrameDecoder } from "../src/frame";
-import { TransactionSender, SenderError, DEFAULT_WORKING_FRAME_BYTES } from "../src/transaction";
-import { RESUME_STATUS } from "../src/control";
+import { FrameType, encodeFrame, FrameDecoder } from "../src/wire/frame";
+import { TransactionSender, SenderError, DEFAULT_WORKING_FRAME_BYTES } from "../src/reliability/transaction";
+import { RESUME_STATUS } from "../src/wire/control";
 
 function filler(length: number, seed = 0x51ed): Uint8Array {
   const out = new Uint8Array(length);
@@ -33,7 +35,6 @@ function makeSender(overrides?: Partial<ConstructorParameters<typeof Transaction
     workingFrameBytes: 8,
     initialTimeoutMs: 100,
     maxTimeoutMs: 800,
-    copyRetentionMs: 1000,
     backpressureCapBytes: 32,
     ...overrides,
   });
@@ -198,75 +199,100 @@ describe("backpressure", () => {
   });
 });
 
-describe("RESUME holder queries", () => {
-  it("answers resumed with frames above the peer frontier", () => {
+describe("recovery discipline (holder side)", () => {
+  it("declarePending gates every pending copy and declares the written progress", () => {
     const sender = makeSender();
-    const payload = filler(24);
-    const { transactionId, frames } = sender.open(payload, { now: 0 });
-    const answer = sender.onResumeRequest(ackEntry(transactionId, 0, 1), 500);
-    expect(answer.status).toBe(RESUME_STATUS.Resumed);
-    expect(answer.frames).toEqual([frames[1], frames[2]]);
-    // The copy stays live and retransmission continues.
-    expect(sender.copyCount).toBe(1);
+    const first = sender.open(filler(24), { now: 0 });
+    const second = sender.open(filler(8, 7), { now: 0 });
+    const entries = sender.declarePending(10);
+    expect(entries).toEqual([
+      { transactionId: first.transactionId, highestContiguousSeq: 2, receivedFrames: 3 },
+      { transactionId: second.transactionId, highestContiguousSeq: 0, receivedFrames: 1 },
+    ]);
+    expect(sender.isAwaitingResume(first.transactionId)).toBe(true);
+    expect(sender.isAwaitingResume(second.transactionId)).toBe(true);
+    // The retransmission clock skips gated copies (no blind retransmission
+    // across a reconnect — the verdict is the sole trigger).
+    expect(sender.dueRetransmissions(1_000_000)).toEqual([]);
+    // An unknown id reads as ungated.
+    expect(sender.isAwaitingResume("ef".repeat(16))).toBe(false);
+  });
+
+  it("Resumed lifts the gate and retransmits every unconfirmed frame", () => {
+    const sender = makeSender();
+    const { transactionId, frames } = sender.open(filler(24), { now: 0 });
+    sender.onAck(ackEntry(transactionId, 0, 1), 5); // frame 0 confirmed
+    sender.declarePending(10);
+    const outcome = sender.applyResumeVerdict({ transactionId, status: RESUME_STATUS.Resumed }, 20);
+    expect(outcome).toEqual({ known: true, failed: false, retransmit: [frames[1], frames[2]] });
+    expect(sender.isAwaitingResume(transactionId)).toBe(false);
+    // The retransmission clock is rearmed (fresh window from the verdict).
+    expect(sender.dueRetransmissions(20 + 99)).toEqual([]);
+    expect(sender.dueRetransmissions(20 + 100)).toEqual([frames[1], frames[2]]);
+    // The copy stays live; the final ACK still completes it.
     expect(sender.onAck(ackEntry(transactionId, 2, 3), 600).released).toBe(true);
   });
 
-  it("answers unknown for never-held transactions", () => {
-    const sender = makeSender();
-    const answer = sender.onResumeRequest(ackEntry("ef".repeat(16), 0, 0), 0);
-    expect(answer.status).toBe(RESUME_STATUS.Unknown);
-    expect(answer.frames).toEqual([]);
-  });
-
-  it("answers rejected for expired copies and leaves a tombstone", () => {
-    const sender = makeSender(); // retention 1000
-    const { transactionId } = sender.open(filler(16), { now: 0 });
-    // t=1001: past retention (1001 - 0 > 1000) → rejected, copy dropped.
-    const answer = sender.onResumeRequest(ackEntry(transactionId, 0, 1), 1001);
-    expect(answer.status).toBe(RESUME_STATUS.Rejected);
-    expect(sender.copyCount).toBe(0);
-    // Tombstone keeps answering rejected after the frames are gone.
-    expect(sender.onResumeRequest(ackEntry(transactionId, 0, 1), 1002).status).toBe(RESUME_STATUS.Rejected);
-    // Tombstones age out after the same window → unknown.
-    expect(sender.onResumeRequest(ackEntry(transactionId, 0, 1), 2100).status).toBe(RESUME_STATUS.Unknown);
-  });
-
-  it("reaps expired copies into tombstones via the sweep", () => {
-    const sender = makeSender(); // retention 1000
-    const first = sender.open(filler(8), { now: 0 });
-    const second = sender.open(filler(8, 7), { now: 500 });
-    expect(sender.reapExpired(400)).toEqual([]);
-    expect(sender.reapExpired(1001)).toEqual([first.transactionId]); // 1001-0 > 1000
-    expect(sender.reapExpired(1501)).toEqual([second.transactionId]); // 1501-500 > 1000
-    expect(sender.copyCount).toBe(0);
-    expect(sender.onResumeRequest(ackEntry(first.transactionId, 0, 1), 1600).status).toBe(RESUME_STATUS.Rejected);
-  });
-
-  it("releases the copy when the peer answers rejected", () => {
+  it("Unknown fails the transfer as a whole: the copy is released (no terminal trace)", () => {
     const sender = makeSender();
     const { transactionId } = sender.open(filler(16), { now: 0 });
-    expect(
-      sender.onResumeResponse({ transactionId, status: RESUME_STATUS.Rejected }, 10),
-    ).toEqual({ known: true, released: true });
+    sender.declarePending(10);
+    expect(sender.applyResumeVerdict({ transactionId, status: RESUME_STATUS.Unknown }, 20)).toEqual({
+      known: true,
+      failed: true,
+      retransmit: [],
+    });
     expect(sender.copyCount).toBe(0);
-    expect(sender.onResumeResponse({ transactionId, status: RESUME_STATUS.Rejected }, 11)).toEqual({
+    // A replayed verdict for the released id fires nothing twice.
+    expect(sender.applyResumeVerdict({ transactionId, status: RESUME_STATUS.Unknown }, 30)).toEqual({
       known: false,
-      released: false,
+      failed: false,
+      retransmit: [],
     });
   });
 
-  it("keeps the copy on resumed / unknown responses", () => {
+  it("Rejected fails exactly like Unknown (wire-compat value)", () => {
     const sender = makeSender();
     const { transactionId } = sender.open(filler(16), { now: 0 });
-    expect(sender.onResumeResponse({ transactionId, status: RESUME_STATUS.Resumed }, 10)).toEqual({
+    sender.declarePending(10);
+    expect(sender.applyResumeVerdict({ transactionId, status: RESUME_STATUS.Rejected }, 20)).toEqual({
       known: true,
-      released: false,
+      failed: true,
+      retransmit: [],
     });
-    expect(sender.onResumeResponse({ transactionId, status: RESUME_STATUS.Unknown }, 20)).toEqual({
-      known: true,
-      released: false,
-    });
-    expect(sender.copyCount).toBe(1);
+    expect(sender.copyCount).toBe(0);
+  });
+
+  it("an aborted copy is never declared; the txid is free for reuse (no tombstones)", () => {
+    const sender = makeSender();
+    const { transactionId } = sender.openStream({ now: 0, totalLen: 16 });
+    sender.abortStream(transactionId, { now: 10 });
+    // No terminal ledger: abort releases the copy from pending and leaves
+    // no trace, so a declaration does not carry it (the receiver answers
+    // `unknown` exactly like for a never-seen transaction).
+    expect(sender.declarePending(20)).toEqual([]);
+    // The released txid is free again (uniqueness is guaranteed by UUID
+    // generation; the pending table self-checks live conflicts).
+    expect(() => sender.openStream({ now: 30, transactionId, totalLen: 16 })).not.toThrow();
+    sender.abortStream(transactionId, { now: 40 }); // release it again
+    expect(() => sender.open(filler(16), { now: 50, transactionId })).not.toThrow();
+  });
+
+  it("a paused copy only lifts the gate on Resumed — the pause intent dominates", () => {
+    const sender = makeSender();
+    const { transactionId } = sender.openStream({ now: 0, totalLen: 16 });
+    sender.setStreamPaused(transactionId, true, { now: 1 });
+    sender.appendChunk(transactionId, filler(8), { now: 2 }); // held while paused
+    sender.declarePending(10);
+    const outcome = sender.applyResumeVerdict({ transactionId, status: RESUME_STATUS.Resumed }, 20);
+    expect(outcome).toEqual({ known: true, failed: false, retransmit: [] });
+    expect(sender.isAwaitingResume(transactionId)).toBe(false);
+    // Still paused: the retransmission clock stays suspended.
+    expect(sender.dueRetransmissions(1_000_000)).toEqual([]);
+    // Unpausing rearms the window and flushes the held frames.
+    const held = sender.setStreamPaused(transactionId, false, { now: 30 });
+    expect(held).toHaveLength(1);
+    expect(sender.dueRetransmissions(30 + 100)).toEqual(held);
   });
 });
 
@@ -276,7 +302,6 @@ describe("option validation", () => {
     expect(() => new TransactionSender({ initialTimeoutMs: -1 })).toThrow(RangeError);
     expect(() => new TransactionSender({ maxTimeoutMs: 1.5 })).toThrow(RangeError);
     expect(() => new TransactionSender({ backpressureCapBytes: 0 })).toThrow(RangeError);
-    expect(() => new TransactionSender({ copyRetentionMs: 0 })).toThrow(RangeError);
   });
 
   it("validates the now parameter on timing-bearing methods", () => {
@@ -285,6 +310,5 @@ describe("option validation", () => {
     const { transactionId } = sender.open(filler(4), { now: 0 });
     expect(() => sender.onAck(ackEntry(transactionId, 0, 1), 1.5)).toThrow(RangeError);
     expect(() => sender.dueRetransmissions(-1)).toThrow(RangeError);
-    expect(() => sender.reapExpired(2.2)).toThrow(RangeError);
   });
 });

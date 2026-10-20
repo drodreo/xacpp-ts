@@ -9,12 +9,12 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { genericCommand } from "../src/commands";
-import type { XacppCommand } from "../src/commands";
-import type { ActivityRef } from "../src/activity-ref";
-import type { XacppActivityEvent } from "../src/events";
-import { newActivityEvent } from "../src/events";
-import { newEvent } from "../src/events";
+import { genericCommand } from "../src/wire/commands";
+import type { XacppCommand } from "../src/wire/commands";
+import type { ActivityRef } from "../src/wire/activity-ref";
+import type { XacppActivityEvent } from "../src/wire/events";
+import { newActivityEvent } from "../src/wire/events";
+import { newEvent } from "../src/wire/events";
 
 // ---- Generic command activity ----
 

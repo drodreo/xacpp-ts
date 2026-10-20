@@ -133,6 +133,13 @@ function withCap<T>(p: Promise<T>, label: string): Promise<T> {
   ]);
 }
 
+/** Non-null unwrap without the `!` assertion — needed where a mutable let is
+ * assigned from a callback and control-flow narrowing cannot follow. */
+function unwrapOrThrow<T>(v: T | null, msg: string): T {
+  if (v === null) throw new Error(msg);
+  return v;
+}
+
 function mb(bytes: number): number {
   return bytes / (1024 * 1024);
 }
@@ -140,7 +147,7 @@ function mb(bytes: number): number {
 // ---- envelope builders ----
 
 /** Request envelope carrying one activity event, padded to ~`target` bytes. */
-function padEnvelope(seq: number, target: number): XacppEnvelope {
+function padEnvelope(seq: number, target: number): Extract<XacppEnvelope, { type: "request" }> {
   const base = newActivityEvent("bench-act", newEvent("content_delta", { seq, pad: "" }));
   const env: XacppEnvelope = { type: "request", id: `r${seq}`, payload: { kind: "event", payload: base } };
   const baseLen = JSON.stringify(env).length;
@@ -318,6 +325,9 @@ interface PairOptions {
 interface Pair {
   client: InstanceType<typeof SocketTransport>;
   server: InstanceType<typeof SocketTransport>;
+  /** Client reliability session — the 1.1 binary send API lives here
+   * (`TransferSession.sendBinary`), not on the raw transport. */
+  clientSession: InstanceType<typeof TransferSession>;
   /** Complete inbound binary transactions, by txid (both sides). A receiver
    * without a registered onBinary handler retains the completed slot and
    * never emits the final ACK — so the pair always registers collectors. */
@@ -353,16 +363,20 @@ async function createPair(opts: PairOptions = {}): Promise<Pair> {
 
   // wait for the server side to finish wiring
   for (let i = 0; i < 2000 && server === null; i++) await new Promise((r) => setTimeout(r, 1));
-  if (server === null) throw new Error("server transport did not start");
+  // `server` is a mutable let assigned from the listener callback, so a plain
+  // null-check narrowing would not carry into the close() closure (and would
+  // collapse to `never` here) — pin the non-null value via a const binding.
+  const serverTransport = unwrapOrThrow<InstanceType<typeof SocketTransport>>(server, "server transport did not start");
 
   return {
     client,
-    server,
+    server: serverTransport,
+    clientSession,
     clientBinaries,
     serverBinaries,
     close: async () => {
       await client.disconnect();
-      await server.disconnect();
+      await serverTransport.disconnect();
       listener.close();
     },
   };
@@ -386,7 +400,7 @@ async function group2(): Promise<boolean> {
       (async () => {
         for (let i = 0; i < N; i++) {
           const s = performance.now();
-          const resp = await pair.client.send(null, req);
+          const resp = await pair.client.send(null, req.payload);
           const e = performance.now();
           if (resp.kind !== "generic") throw new Error("rtt: unexpected response");
           latencies.push(e - s);
@@ -409,7 +423,7 @@ async function group2(): Promise<boolean> {
     const confirmed = new Map<string, boolean>();
 
     const done = new Promise<void>((resolve, reject) => {
-      pair.client.sendBinary(payload, (result) => {
+      pair.clientSession.sendBinary(payload, (result) => {
         confirmed.set(result.transactionId, result.confirmed);
         resolve();
       });
@@ -447,7 +461,7 @@ async function group2(): Promise<boolean> {
       Promise.all(
         Array.from({ length: CONCURRENT_SENDS }, () => {
           return new Promise<void>((resolve, reject) => {
-            pair.client.sendBinary(payload, (result) => {
+            pair.clientSession.sendBinary(payload, (result) => {
               confirmed.set(result.transactionId, result.confirmed);
               resolve();
             });
@@ -555,7 +569,7 @@ async function group3(): Promise<boolean> {
   for (let round = 0; round < BULK_ROUNDS; round++) {
     await withCap(
       new Promise<void>((resolve, reject) => {
-        pair.client.sendBinary(payload, (result) => {
+        pair.clientSession.sendBinary(payload, (result) => {
           if (!result.confirmed) reject(new Error("group 3: bulk round released unconfirmed"));
           resolve();
         });

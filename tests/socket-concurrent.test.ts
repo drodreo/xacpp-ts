@@ -15,13 +15,13 @@
 import { describe, it, expect } from "vitest";
 import * as net from "node:net";
 
-import type { RequestHandler } from "../src/transport";
-import type { XacppCommand } from "../src/commands";
-import { genericCommand } from "../src/commands";
-import type { XacppRequest, XacppResponse } from "../src/message";
-import { genericResponse } from "../src/message";
-import { newActivityEvent, newEvent } from "../src/events";
-import { SocketTransport } from "../src/socket-transport";
+import type { RequestHandler } from "../src/carrier/transport";
+import type { XacppCommand } from "../src/wire/commands";
+import { genericCommand } from "../src/wire/commands";
+import type { XacppRequest, XacppResponse } from "../src/wire/message";
+import { genericResponse } from "../src/wire/message";
+import { newActivityEvent, newEvent } from "../src/wire/events";
+import { SocketTransport } from "../src/carrier/socket";
 
 // ---- Helper functions ----
 

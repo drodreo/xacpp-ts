@@ -30,7 +30,7 @@ import {
   encodeNack,
   encodeResumeRequest,
   encodeResumeResponse,
-} from "../src/control";
+} from "../src/wire/control";
 
 const TX_A = "000102030405060708090a0b0c0d0e0f";
 const TX_B = "ffffffffffffffffffffffffffffffff";

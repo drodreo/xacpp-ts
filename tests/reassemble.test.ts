@@ -10,13 +10,13 @@
  * 6. Protocol violations: total_len mismatch, byte overrun, duplicate length mismatch
  * 7. Delivery consumes the slot; take() on unknown/incomplete throws
  * 8. ACK export: cumulative frontier + distinct received counts; zero-progress slots omitted
- * 9. Stale cleanup: only incomplete, past-retention slots are reaped
+ * 9. No stale sweep: incomplete slots live until delivered or explicitly discarded
  */
 
 import { describe, it, expect } from "vitest";
-import { makeFrame, FrameType, newTransactionId } from "../src/frame";
-import type { Frame } from "../src/frame";
-import { TransactionReassembler, ReassemblyError, NACK_MISSING_SEQS_MAX } from "../src/reassemble";
+import { makeFrame, FrameType, newTransactionId } from "../src/wire/frame";
+import type { Frame } from "../src/wire/frame";
+import { TransactionReassembler, ReassemblyError, NACK_MISSING_SEQS_MAX } from "../src/reliability/reassemble";
 
 /** Split `payload` into `chunkSize`-byte DATA_BINARY frames of one transaction. */
 function chunk(
@@ -288,25 +288,13 @@ describe("delivery consumes the slot", () => {
   });
 });
 
-describe("stale cleanup", () => {
-  it("reaps only incomplete slots past retention and refreshes on new frames", () => {
-    const reassembler = new TransactionReassembler({ staleRetentionMs: 100 });
+describe("no stale sweep (v3)", () => {
+  it("keeps incomplete slots alive regardless of elapsed time — they are the RESUME anchor", () => {
+    const reassembler = new TransactionReassembler();
     const stale = chunk(filler(9), 3);
-    const fresh = chunk(filler(9, 7), 3);
     reassembler.push(stale[0], 0); // last activity t=0
-    reassembler.push(fresh[0], 90); // last activity t=90
-    expect(reassembler.reapStale(50)).toEqual([]); // nothing past 100ms
-    expect(reassembler.reapStale(150)).toEqual([stale[0].transactionId]); // 150-0 > 100
-    expect(reassembler.has(stale[0].transactionId)).toBe(false);
-    expect(reassembler.has(fresh[0].transactionId)).toBe(true);
-  });
-
-  it("never auto-reaps complete-but-undelivered slots", () => {
-    const reassembler = new TransactionReassembler({ staleRetentionMs: 100 });
-    const frames = chunk(filler(9), 3);
-    frames.forEach((f) => reassembler.push(f, 0));
-    expect(reassembler.reapStale(1_000_000)).toEqual([]);
-    expect(reassembler.isComplete(frames[0].transactionId)).toBe(true);
+    // No API can age this slot out: only take()/discard() remove slots.
+    expect(reassembler.has(stale[0].transactionId)).toBe(true);
   });
 
   it("validates the now parameter", () => {
@@ -314,7 +302,6 @@ describe("stale cleanup", () => {
     const frames = chunk(filler(3), 3);
     expect(() => reassembler.push(frames[0], -1)).toThrow(RangeError);
     expect(() => reassembler.push(frames[0], 1.5)).toThrow(RangeError);
-    expect(() => reassembler.reapStale(-5)).toThrow(RangeError);
   });
 });
 

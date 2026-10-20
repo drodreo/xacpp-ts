@@ -13,12 +13,12 @@
 import { describe, it, expect } from "vitest";
 import * as net from "node:net";
 
-import { FrameDecoder, FrameType } from "../src/frame";
-import { genericResponse } from "../src/message";
-import type { XacppRequest } from "../src/message";
-import { newActivityEvent, newEvent } from "../src/events";
-import { SocketTransport } from "../src/socket-transport";
-import type { RequestHandler } from "../src/transport";
+import { FrameDecoder, FrameType } from "../src/wire/frame";
+import { genericResponse } from "../src/wire/message";
+import type { XacppRequest } from "../src/wire/message";
+import { newActivityEvent, newEvent } from "../src/wire/events";
+import { SocketTransport } from "../src/carrier/socket";
+import type { RequestHandler } from "../src/carrier/transport";
 
 // ---- Helpers ----
 

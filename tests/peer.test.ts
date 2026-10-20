@@ -10,18 +10,18 @@
  */
 
 import { describe, it, expect } from "vitest";
-import type { XacppRequest, XacppResponse } from "../src/message";
-import { XacppError, acknowledge, genericResponse } from "../src/message";
-import type { XacppTransport, RequestHandler } from "../src/transport";
-import type { XacppCommand } from "../src/commands";
-import { genericCommand } from "../src/commands";
-import type { XacppActivityEvent } from "../src/events";
-import { newEvent, newActivityEvent } from "../src/events";
-import type { XacppSessionHandler, EstablishHandler, EstablishDecision, NegotiateHandler } from "../src/handler";
-import type { Capabilities, EffectiveCapabilities } from "../src/capability";
-import { XacppPeer, PeerState } from "../src/peer";
-import { XacppSession } from "../src/session";
-import type { Frame } from "../src/frame";
+import type { XacppRequest, XacppResponse } from "../src/wire/message";
+import { XacppError, acknowledge, genericResponse } from "../src/wire/message";
+import type { XacppTransport, RequestHandler } from "../src/carrier/transport";
+import type { XacppCommand } from "../src/wire/commands";
+import { genericCommand } from "../src/wire/commands";
+import type { XacppActivityEvent } from "../src/wire/events";
+import { newEvent, newActivityEvent } from "../src/wire/events";
+import type { XacppSessionHandler, EstablishHandler, EstablishDecision, NegotiateHandler } from "../src/session/handler";
+import type { Capabilities, EffectiveCapabilities } from "../src/wire/capability";
+import { XacppPeer, PeerState } from "../src/session/peer";
+import { XacppSession } from "../src/session/session";
+import type { Frame } from "../src/wire/frame";
 import type { TransferActivityHandlers, TransferWiring } from "../src/transfer";
 import type {
   ActionRequestPayload,
@@ -30,7 +30,7 @@ import type {
   QuestionResponse,
   SensitiveInfoOperationPayload,
   SensitiveInfoResult,
-} from "../src/events/interaction";
+} from "../src/wire/events/interaction";
 
 // ---- Test Handler implementations ----
 
@@ -1035,6 +1035,58 @@ describe("Multi session routing", () => {
     if (resp1Again.kind === "generic") {
       expect(resp1Again.name).toBe("identified");
       expect((resp1Again.data as { sessionId: string }).sessionId).toBe("handler-1");
+    }
+  });
+  it("re-establish with the same session id reuses the held session (reconnect continuity)", async () => {
+    // Responder always answers "auto-sid" — the answer naming our bound
+    // identity rules "same logical session back": the held session (and its
+    // transfer state) is reused, never replaced.
+    const [transportA, transportB] = duplexPair();
+    const emptyCaps: Capabilities = { commands: [], produceEvents: [], acceptEvents: [] };
+    const peerA = new XacppPeer(emptyCaps, transportA, new AcceptAllNegotiateHandler(), new SequencedEstablishHandler(), new XacppSession());
+    const peerB = new XacppPeer(emptyCaps, transportB, new AcceptAllNegotiateHandler(), new AutoApproveEstablishHandler());
+    await peerA.connect();
+    await peerB.connect();
+    await peerA.negotiate();
+    await peerB.negotiate();
+
+    const handlerA = new TestSessionHandler();
+    const session1 = await timeout(peerA.establish(undefined, handlerA, () => {}));
+    const session2 = await timeout(peerA.establish(undefined, handlerA, () => {}));
+    expect(session1.sessionId).toBe("auto-sid");
+    expect(session2).toBe(session1); // identity: the SAME object, transfer state intact
+  });
+
+  it("establish with a different session id detaches the held session's transfer mount but keeps its envelope path", async () => {
+    // The transfer mount is a single slot — a new logical session takes it.
+    // The held session's transfer clock MUST stop (an orphaned clock never
+    // sees inbound activity again and its silence timer would tear the
+    // shared connection down ~90s later); its envelope path must stay
+    // alive — the envelope channel routes by session_id.
+    const [transportA, transportB] = duplexPair();
+    const emptyCaps: Capabilities = { commands: [], produceEvents: [], acceptEvents: [] };
+    const peerA = new XacppPeer(emptyCaps, transportA, new AcceptAllNegotiateHandler(), new SequencedEstablishHandler(), new XacppSession());
+    const peerB = new XacppPeer(emptyCaps, transportB, new AcceptAllNegotiateHandler(), new SequencedEstablishHandler());
+    await peerA.connect();
+    await peerB.connect();
+    await peerA.negotiate();
+    await peerB.negotiate();
+
+    const handlerA = new TestSessionHandler();
+    const session1 = await timeout(peerA.establish(undefined, handlerA, () => {})); // handler-1
+    const session2 = await timeout(peerA.establish(undefined, handlerA, () => {})); // handler-2
+    expect(session2).not.toBe(session1);
+
+    // Transfer mount moved to the new session; the old one is detached.
+    expect(() => session1.openBinarySink({ totalLen: 1 })).toThrow(XacppError.notConnected());
+    expect(() => session2.openBinarySink({ totalLen: 1 })).not.toThrow();
+
+    // Envelope path of the held session is untouched (routes to handler-1).
+    const resp1 = await timeout(session1.requestCommand(genericCommand("new_activity", { title: null })));
+    expect(resp1.kind).toBe("generic");
+    if (resp1.kind === "generic") {
+      expect(resp1.name).toBe("identified");
+      expect((resp1.data as { sessionId: string }).sessionId).toBe("handler-1");
     }
   });
 });

@@ -14,13 +14,13 @@
  */
 
 import { describe, it, expect } from "vitest";
-import type { FileRef } from "../src/events/content";
-import type { XacppEvent } from "../src/events/xacpp_event";
-import { newEvent } from "../src/events/xacpp_event";
-import type { XacppEnvelope } from "../src/message";
-import type { ActivityInfo } from "../src/message";
-import { acknowledge, genericResponse, errorResponse } from "../src/message";
-import type { XacppCommand } from "../src/commands";
+import type { FileRef } from "../src/wire/events/content";
+import type { XacppEvent } from "../src/wire/events/xacpp_event";
+import { newEvent } from "../src/wire/events/xacpp_event";
+import type { XacppEnvelope } from "../src/wire/message";
+import type { ActivityInfo } from "../src/wire/message";
+import { acknowledge, genericResponse, errorResponse } from "../src/wire/message";
+import type { XacppCommand } from "../src/wire/commands";
 import type {
   ArchiveActivityPayload,
   AvailableActivitiesResponse,
@@ -33,14 +33,14 @@ import type {
   NewActivityPayload,
   SetActivityModePayload,
   SwitchActivityPayload,
-} from "../src/commands";
-import { genericCommand } from "../src/commands";
+} from "../src/wire/commands";
+import { genericCommand } from "../src/wire/commands";
 import type {
   ActionRequestPayload,
   QuestionPayload,
   SensitiveInfoOperationPayload,
-} from "../src/events/interaction";
-import type { ToolResultEvent } from "../src/events/payload";
+} from "../src/wire/events/interaction";
+import type { ToolResultEvent } from "../src/wire/events/payload";
 
 // ---- XacppEvent round-trip ----
 

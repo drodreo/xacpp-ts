@@ -15,12 +15,12 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import * as net from "node:net";
 
-import { SocketTransport } from "../src/socket-transport";
+import { SocketTransport } from "../src/carrier/socket";
 import { TransferSession } from "../src/transfer";
 import type { BinarySendResult } from "../src/transfer";
-import { newActivityEvent, newEvent } from "../src/events";
-import { genericResponse } from "../src/message";
-import type { RequestHandler } from "../src/transport";
+import { newActivityEvent, newEvent } from "../src/wire/events";
+import { genericResponse } from "../src/wire/message";
+import type { RequestHandler } from "../src/carrier/transport";
 
 // ---- Helpers ----
 
@@ -171,8 +171,8 @@ describe("transfer session — RESUME across connections", () => {
     await settle(); // server-side reader observes the close; the slot persists
 
     // Real reconnect: the same session wired into a fresh transport — on
-    // wire the receiver's auto-RESUME + the holder's retransmission copies
-    // finish the job.
+    // wire the holder declares its pending send (RESUME), the receiver
+    // adjudicates it still open, and the verdict re-arms retransmission.
     const client2 = await connectClient(server.port(), sessionClient);
     await waitFor(() => server.connectedCount() >= 2, "replacement server transport");
     await settle();

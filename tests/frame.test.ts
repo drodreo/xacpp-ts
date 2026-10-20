@@ -10,7 +10,7 @@
  *    pseudo-magic inside payload data
  * 6. Per-type size limits (16 KiB / 1 MiB / 16 MiB) and rejection
  * 7. Error kinds: CRC tampering detection, version mismatch, malformed input
- * 8. Unknown frame types are consumed and ignored (SPEC §8)
+ * 8. Unknown frame types are consumed and ignored (SPEC §9)
  * 9. Transaction id generation and frame construction defaults
  */
 
@@ -31,8 +31,8 @@ import {
   DATA_BINARY_FRAME_MAX,
   DEFAULT_DECODE_BUFFER_CAP,
   FRAME_FIXED_OVERHEAD,
-} from "../src/frame";
-import type { Frame } from "../src/frame";
+} from "../src/wire/frame";
+import type { Frame } from "../src/wire/frame";
 
 const MAGIC = Uint8Array.of(0x58, 0x41, 0x43, 0x50); // "XACP"
 
@@ -489,7 +489,7 @@ describe("integrity and protocol errors", () => {
   });
 });
 
-describe("unknown frame types (SPEC §8 tolerance)", () => {
+describe("unknown frame types (SPEC §9 tolerance)", () => {
   it("consumes and ignores unknown frame types without error", () => {
     const unknown = makeFrame(0x7fff, ascii("future-frame"));
     const known = makeFrame(FrameType.DATA_JSON, ascii('{"after":"unknown"}'));

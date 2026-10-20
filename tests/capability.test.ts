@@ -16,8 +16,8 @@ import {
   isToolFacing,
   requireToolCall,
   hasCompactScope,
-} from "../src/capability";
-import type { CommandDeclaration } from "../src/capability";
+} from "../src/wire/capability";
+import type { CommandDeclaration } from "../src/wire/capability";
 
 describe("CommandDeclaration", () => {
   it("full declaration parse and helpers", () => {
