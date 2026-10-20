@@ -14,10 +14,12 @@
 import { randomUUID } from "node:crypto";
 import { crc32 as zlibCrc32 } from "node:zlib";
 
-/** Wire protocol major version carried in every frame header (SPEC §3/§8). */
+/** Wire protocol major version carried in every frame header (SPEC §3/§9). */
 export const PROTOCOL_VERSION_MAJOR = 1;
-/** Wire protocol minor version carried in every frame header (SPEC §3/§8). */
-export const PROTOCOL_VERSION_MINOR = 0;
+/** Wire protocol minor version carried in every frame header (SPEC §3/§9).
+ * Advances with the library minor version; fetch (1.1) is an envelope-level
+ * extension — frame format unchanged. */
+export const PROTOCOL_VERSION_MINOR = 1;
 
 /** ASCII "XACP" frame magic (SPEC §3). */
 const MAGIC_BYTES = new Uint8Array([0x58, 0x41, 0x43, 0x50]);
@@ -48,6 +50,9 @@ export const FrameType = {
   ERROR: 0x0006,
   SECURITY_UPGRADE: 0x0007,
   RESUME_RESPONSE: 0x0008,
+  TRANSACTION_PAUSE: 0x0009,
+  TRANSACTION_ABORT: 0x000a,
+  TRANSACTION_COMPLETED: 0x000b,
   // Data class
   DATA_JSON: 0x1001,
   DATA_BINARY: 0x1002,
@@ -62,6 +67,9 @@ const CONTROL_FRAME_TYPES: ReadonlySet<number> = new Set([
   FrameType.ERROR,
   FrameType.SECURITY_UPGRADE,
   FrameType.RESUME_RESPONSE,
+  FrameType.TRANSACTION_PAUSE,
+  FrameType.TRANSACTION_ABORT,
+  FrameType.TRANSACTION_COMPLETED,
 ]);
 
 const DATA_FRAME_TYPES: ReadonlySet<number> = new Set([
@@ -102,7 +110,7 @@ export function isKnownFrameType(frameType: number): boolean {
 
 /**
  * Per-type payload size limit; `undefined` for unknown frame types
- * (a higher-minor peer may define larger classes — SPEC §8 tolerance).
+ * (a higher-minor peer may define larger classes — SPEC §9 tolerance).
  */
 function frameTypeLimit(frameType: number): number | undefined {
   if (isControlFrameType(frameType)) return CONTROL_FRAME_MAX;
@@ -294,7 +302,7 @@ interface DecodedHeader {
 interface ParseResult {
   /** True when one frame worth of bytes was consumed (emitted or ignored). */
   consumed: boolean;
-  /** Decoded frame; null when an unknown frame type was consumed and ignored (SPEC §8). */
+  /** Decoded frame; null when an unknown frame type was consumed and ignored (SPEC §9). */
   frame: Frame | null;
 }
 
@@ -323,7 +331,7 @@ interface ParseResult {
  *   unknown frame types — as a protocol error.
  *
  * Unknown frame types are decoded, CRC-verified, and silently dropped
- * ("unknown frame types are ignored", SPEC §8).
+ * ("unknown frame types are ignored", SPEC §9).
  */
 export class FrameDecoder {
   private buf: Uint8Array = new Uint8Array(4096);
@@ -457,7 +465,7 @@ export class FrameDecoder {
     if (header.versionMajor !== PROTOCOL_VERSION_MAJOR) {
       throw new FrameError(
         FrameErrorCode.UnsupportedVersion,
-        `version_major ${header.versionMajor} != supported ${PROTOCOL_VERSION_MAJOR} (connection refused, SPEC §8)`,
+        `version_major ${header.versionMajor} != supported ${PROTOCOL_VERSION_MAJOR} (connection refused, SPEC §9)`,
       );
     }
     const limit = frameTypeLimit(header.frameType);
@@ -494,7 +502,7 @@ export class FrameDecoder {
       );
     }
 
-    // 5. Emit (or ignore unknown frame types, SPEC §8).
+    // 5. Emit (or ignore unknown frame types, SPEC §9).
     const payload = this.buf.slice(HEADER_SIZE, crcOffset);
     this.consume(need);
     if (!isKnownFrameType(header.frameType)) {

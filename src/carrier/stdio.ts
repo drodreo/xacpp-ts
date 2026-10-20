@@ -15,13 +15,13 @@
  */
 
 import type { RequestHandler, XacppTransport } from "./transport";
-import type { XacppEnvelope, XacppRequest, XacppResponse } from "./message";
-import { XacppError } from "./message";
-import { ClosedSignal, Egress } from "./egress";
-import type { EgressHost, EgressWriter, PendingMap } from "./egress";
-import { FrameDecoder, FrameType, encodeFrame, makeFrame } from "./frame";
-import type { Frame } from "./frame";
-import type { TransferActivityHandlers, TransferWiring } from "./transfer";
+import type { XacppEnvelope, XacppRequest, XacppResponse } from "../wire/message";
+import { XacppError } from "../wire/message";
+import { ClosedSignal, Egress } from "../session/egress";
+import type { EgressHost, EgressWriter, PendingMap } from "../session/egress";
+import { FrameDecoder, FrameType, encodeFrame, makeFrame } from "../wire/frame";
+import type { Frame } from "../wire/frame";
+import type { TransferActivityHandlers, TransferWiring } from "../transfer";
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -74,7 +74,7 @@ export class StdioTransport implements XacppTransport, TransferWiring {
     writer: NodeJS.WritableStream,
     reader: NodeJS.ReadableStream,
   ) {
-    this.writer = writer as EgressWriter;
+    this.writer = writer;
     this.reader = reader;
   }
 
@@ -91,7 +91,8 @@ export class StdioTransport implements XacppTransport, TransferWiring {
 
     // Streaming receive: raw byte chunks feed the frame decoder (no line
     // splitting — frame boundaries come from the wire format, not "\n").
-    this.decoder = new FrameDecoder();
+    const decoder = new FrameDecoder();
+    this.decoder = decoder;
     this.decoderDead = false;
     this.readerGone = false;
 
@@ -100,7 +101,7 @@ export class StdioTransport implements XacppTransport, TransferWiring {
       const bytes = typeof chunk === "string" ? textEncoder.encode(chunk) : new Uint8Array(chunk);
       let frames: Frame[];
       try {
-        frames = this.decoder!.push(bytes);
+        frames = decoder.push(bytes);
       } catch (e) {
         // Protocol violation (version / CRC / oversize): the stream cannot
         // be resynced — connection-level throw semantics = connection dead.

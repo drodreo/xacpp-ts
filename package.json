@@ -1,6 +1,6 @@
 {
   "name": "xacpp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Agent Control Plane Protocol — TypeScript implementation",
   "keywords": [
     "xacpp",
@@ -16,15 +16,15 @@
   },
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.mjs",
-  "types": "./dist/esm/index.d.ts",
+  "types": "./dist/esm/index.d.mts",
   "exports": {
     ".": {
       "import": {
-        "types": "./dist/esm/index.d.ts",
+        "types": "./dist/esm/index.d.mts",
         "default": "./dist/esm/index.mjs"
       },
       "require": {
-        "types": "./dist/esm/index.d.ts",
+        "types": "./dist/esm/index.d.mts",
         "default": "./dist/cjs/index.js"
       }
     }
@@ -43,6 +43,7 @@
   },
   "packageManager": "pnpm@10.33.0",
   "devDependencies": {
+    "@microsoft/api-extractor": "^7.59.4",
     "@rslib/core": "^0.21.5",
     "@types/node": "^25.7.0",
     "typescript": "^6.0.3",

@@ -10,18 +10,22 @@
  * replacement transport and interrupted transfers resume (SPEC §5).
  */
 
-import type { XacppTransport } from "./transport";
-import type { XacppCommand } from "./commands";
-import type { XacppActivityEvent } from "./events";
-import type { XacppRequest, XacppResponse } from "./message";
-import { XacppError } from "./message";
-import { TransferSession } from "./transfer";
+import type { XacppTransport } from "../carrier/transport";
+import type { XacppCommand } from "../wire/commands";
+import type { XacppActivityEvent } from "../wire/events";
+import type { XacppResponse } from "../wire/message";
+import { XacppError } from "../wire/message";
+import { TransferSession } from "../transfer";
 import type {
   BinaryHandler,
   BinarySendResult,
+  BinarySink,
+  BinarySinkMeta,
+  BinaryStreamHandler,
   TransferConfig,
   TransferWiring,
-} from "./transfer";
+} from "../transfer";
+import type { FetchReady } from "../wire/fetch";
 
 /** XACPP logical session.
  *
@@ -79,8 +83,8 @@ export class XacppSession {
 
   /**
    * Attach the session to a live transport: communication channel +
-   * transfer state (binding, clock, auto-RESUME). Auto-detaches when the
-   * transport closes; wiring the same session into a replacement
+   * transfer state (binding, clock, recovery declaration). Auto-detaches
+   * when the transport closes; wiring the same session into a replacement
    * transport resumes interrupted transfers.
    */
   wire(transport: XacppTransport & TransferWiring): void {
@@ -95,6 +99,30 @@ export class XacppSession {
     this.unwireOnClose?.();
     this.unwireOnClose = null;
     this.wiredTransport = null;
+    this.transfer.unwire();
+  }
+
+  /**
+   * Ensure the transfer mount is attached to the given transport
+   * (idempotent no-op while attached). Used by the peer when an establish
+   * re-binds this session — `connect` performs the initial mount.
+   * @internal
+   */
+  attachTransfer(transport: XacppTransport & TransferWiring): void {
+    if (this.transfer.wired) return;
+    this.transfer.wire(transport);
+  }
+
+  /**
+   * Detach ONLY the transfer mount (clock stopped, single-slot handler
+   * registration released): the envelope identity stays wired — the
+   * envelope channel routes by session_id. Used by the peer when an
+   * establish yields a different session identity on this connection: an
+   * orphaned transfer clock would never see inbound activity again and
+   * its silence timer would tear the shared connection down.
+   * @internal
+   */
+  detachTransfer(): void {
     this.transfer.unwire();
   }
 
@@ -136,12 +164,62 @@ export class XacppSession {
   }
 
   /**
+   * Open a streaming send transaction (see `TransferSession.openBinarySink`):
+   * chunked writes with ACK-driven backpressure, pause/resume/abort gating.
+   */
+  openBinarySink(meta: BinarySinkMeta, txid?: string): BinarySink {
+    return this.transfer.openBinarySink(meta, txid);
+  }
+
+  /**
    * Register the handler for complete inbound binary transactions
    * (receives txid + the bit-exact payload). Pass null to unregister.
    * Payloads completing before registration are delivered exactly once.
+   *
+   * A transaction claimed by a stream (see `onBinaryStream`) never reaches
+   * this handler — exactly one delivery surface owns each transaction.
    */
   onBinary(handler: BinaryHandler | null): void {
     this.transfer.onBinary = handler;
+  }
+
+  /**
+   * Register the streaming receive handler (single slot): invoked once per
+   * inbound transaction at its first frame, exposing ordered chunks, live
+   * pause/stall state, and a terminal reason (`completed` / `cancelled` —
+   * streams survive connection drops and end only on completion or
+   * cancellation). Pass null to unregister.
+   */
+  onBinaryStream(handler: BinaryStreamHandler | null): void {
+    this.transfer.onBinaryStream = handler;
+  }
+
+  /**
+   * Fetch a resource's metadata from the peer by uri (SPEC §8 — the
+   * stateless kernel): sends `fetch{uri}`, awaits the `fetch_ready`
+   * response, and resolves with the declared metadata ONLY. The bytes
+   * travel as a binary transaction whose id IS `ready.txid`; receive them
+   * through `onBinaryStream` (or `onBinary`) — the kernel imposes no
+   * buffering or delivery on their behalf (SPEC §8.4/§8.6).
+   *
+   * Connection loss fails the command with a not-connected error — retry
+   * by re-issuing the same uri (idempotent; the responder decides
+   * freshness).
+   */
+  async fetch(uri: string): Promise<FetchReady> {
+    const response = await this.requestCommand({ fetch: { uri } });
+    if (response.kind === "error") {
+      throw XacppError.application(response.code, response.message);
+    }
+    if (response.kind !== "fetch_ready") {
+      throw XacppError.internal(`unexpected response to fetch: ${JSON.stringify(response)}`);
+    }
+    return {
+      txid: response.txid,
+      sha256: response.sha256,
+      sizeBytes: response.sizeBytes,
+      mime: response.mime,
+    };
   }
 
   /**

@@ -37,16 +37,15 @@
  * ```
  */
 
-import type { XacppTransport } from "./transport";
-import type { XacppCommand } from "./commands";
-import type { XacppActivityEvent } from "./events";
-import type { XacppRequest, XacppResponse } from "./message";
-import { XacppError } from "./message";
-import type { Capabilities, EffectiveCapabilities } from "./capability";
-import type { EstablishDecision, EstablishHandler, NegotiateHandler, XacppSessionHandler } from "./handler";
-import { computeEffectiveCapabilities } from "./capability";
+import type { XacppTransport } from "../carrier/transport";
+import { XacppError } from "../wire/message";
+import { isFetchFamily } from "../wire/commands";
+import { FETCH_UNAVAILABLE } from "../wire/fetch";
+import type { Capabilities } from "../wire/capability";
+import type { EstablishHandler, NegotiateHandler, XacppSessionHandler } from "./handler";
+import { computeEffectiveCapabilities } from "../wire/capability";
 import { XacppSession } from "./session";
-import type { TransferWiring } from "./transfer";
+import { isTransferWiring } from "../transfer";
 
 /** Peer protocol state. */
 export enum PeerState {
@@ -131,7 +130,7 @@ export class XacppPeer {
             const effective = computeEffectiveCapabilities(capabilities, remoteCaps);
             self._emitEvents = effective.emitEvents;
             await negotiateHandler.onNegotiate(effective);
-            return { kind: "negotiated" as const, capabilities: capabilities };
+            return { kind: "negotiated" as const, capabilities };
           }
           if (payload.kind === "command" && typeof payload.payload === "object" && "establish" in payload.payload) {
             // Establish request
@@ -160,6 +159,18 @@ export class XacppPeer {
         }
 
         if (payload.kind === "command") {
+          // Fetch-family commands are gated (SPEC §8.2): with no loaded
+          // fetch responder the library answers `fetch_unavailable`
+          // loudly — never a silent fall-through to the consumer. A
+          // loaded responder receives the commands untouched (the fetch
+          // kernel stays stateless).
+          if (isFetchFamily(payload.payload) && !handler.isFetchResponder) {
+            return {
+              kind: "error" as const,
+              code: FETCH_UNAVAILABLE,
+              message: "fetch unsupported on this end (no fetch responder loaded)",
+            };
+          }
           return handler.onCommand(payload.payload);
         } else {
           return handler.onEvent(payload.payload);
@@ -172,7 +183,14 @@ export class XacppPeer {
       this._state = PeerState.Connected;
     }
     if (this.session) {
-      this.session.wire(this.transport as XacppTransport & TransferWiring);
+      const transport = this.transport;
+      if (isTransferWiring(transport)) {
+        this.session.wire(transport);
+      } else {
+        console.warn(
+          "[xacpp:peer] transport carries no binary channel — the transfer session stays unwired",
+        );
+      }
     }
   }
 
@@ -231,7 +249,7 @@ export class XacppPeer {
 
     if (response.kind === "established") {
       this.sessions.set(response.sessionId, handler);
-      const session = this.sessionForEstablish();
+      const session = this.sessionForEstablish(response.sessionId);
       session.bindIdentity(response.sessionId, response.credentials);
       return session;
     }
@@ -245,7 +263,7 @@ export class XacppPeer {
 
       if (confirmResponse.kind === "established") {
         this.sessions.set(confirmResponse.sessionId, handler);
-        const session = this.sessionForEstablish();
+        const session = this.sessionForEstablish(confirmResponse.sessionId);
         session.bindIdentity(confirmResponse.sessionId, confirmResponse.credentials);
         return session;
       }
@@ -282,14 +300,34 @@ export class XacppPeer {
   }
 
   /**
-   * Session to bind for an establish success: the first establish backfills
-   * the held session; later establishes spawn fresh (default-configuration)
-   * sessions wired to the transport — one logical session per establish.
+   * Session to bind for an establish success, driven by the responder's
+   * answer (identity continuity is the responder's verdict — credentials
+   * are the anchor, the answer's sessionId is the ruling):
+   *
+   * - Answer names the held session's bound identity (or the held session
+   *   is not bound yet — first establish): it IS the same logical session
+   *   back — reuse the held session (its transfer state survives: streams,
+   *   reassembly slots, send copies all resume across the reconnect) and
+   *   make sure the transfer mount is attached.
+   * - Answer names a DIFFERENT identity: a new logical session is born.
+   *   The held session's transfer mount is detached first — the mount is a
+   *   single slot (per-transaction routing is future evolution), and an
+   *   orphaned transfer clock never sees inbound activity again: its
+   *   silence timer would declare the peer dead and tear THIS connection
+   *   down ~90s later. The held session's envelope identity stays wired —
+   *   the envelope channel routes by session_id, so coexisting sessions on
+   *   one connection keep their command/event paths.
    */
-  private sessionForEstablish(): XacppSession {
-    if (this.session && !this.session.identityBound) return this.session;
+  private sessionForEstablish(sessionId: string): XacppSession {
+    const transport = this.transport;
+    const wiring = isTransferWiring(transport) ? transport : null;
+    if (this.session && (!this.session.identityBound || this.session.sessionId === sessionId)) {
+      if (wiring !== null) this.session.attachTransfer(wiring);
+      return this.session;
+    }
+    this.session?.detachTransfer();
     const fresh = new XacppSession();
-    fresh.wire(this.transport as XacppTransport & TransferWiring);
+    if (wiring !== null) fresh.wire(wiring);
     return fresh;
   }
 }

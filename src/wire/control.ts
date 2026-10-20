@@ -9,8 +9,9 @@
  *
  * Payload codecs pair with frame types one-to-one (see
  * {@link CONTROL_PAYLOAD_FRAME_TYPES}): a RESUME payload rides a
- * `RESUME` frame (receiver → holder); a RESUME_RESPONSE payload rides a
- * `RESUME_RESPONSE` frame (holder → receiver). The two directions never
+ * `RESUME` frame (holder → receiver: pending-send declaration); a
+ * RESUME_RESPONSE payload rides a `RESUME_RESPONSE` frame (receiver →
+ * holder: per-entry verdict). The two directions never
  * share a frame type — dispatch on `frame_type`, never on payload shape.
  *
  * All failures are raised as {@link ControlError} — a channel distinct
@@ -31,6 +32,9 @@ export const CONTROL_PAYLOAD_FRAME_TYPES = {
   resumeResponse: FrameType.RESUME_RESPONSE,
   heartbeat: FrameType.HEARTBEAT,
   error: FrameType.ERROR,
+  transactionPause: FrameType.TRANSACTION_PAUSE,
+  transactionAbort: FrameType.TRANSACTION_ABORT,
+  transactionCompleted: FrameType.TRANSACTION_COMPLETED,
 } as const;
 
 /** Error kinds raised by the control payload codecs. */
@@ -92,7 +96,7 @@ export interface NackEntry {
 export const RESUME_STATUS = {
   /** Copy held; retransmission follows. */
   Resumed: 0x01,
-  /** Copy no longer held (e.g. retention expired); receiver discards the transaction. */
+  /** Transaction finalized on the holder side (aborted); receiver discards the transaction. */
   Rejected: 0x02,
   /** Receiver asks about a transaction this side never held. */
   Unknown: 0x03,
@@ -429,4 +433,62 @@ export function decodeError(payload: Uint8Array): ProtocolErrorInfo {
     fail(ControlErrorCode.MalformedPayload, "ERROR message is not valid UTF-8");
   }
   return { code, message };
+}
+
+// ---- TRANSACTION_PAUSE / TRANSACTION_ABORT (SPEC §5 control layouts) ----
+//
+// Both frames carry the identical payload shape — a bare 16-byte transaction
+// id — and differ only in frame type (dispatch on frame_type, never on
+// payload shape). `TRANSACTION_PAUSE`: the holder paused transmission of the
+// transaction. `TRANSACTION_ABORT`: the holder abandoned it and released its
+// retained copy; the receiver discards the partial reassembly.
+
+function encodeTransactionIdPayload(transactionId: string): Uint8Array {
+  const out = new Uint8Array(TRANSACTION_ID_BYTES);
+  out.set(parseTransactionId(transactionId), 0);
+  return out;
+}
+
+function decodeTransactionIdPayload(what: string, payload: Uint8Array): string {
+  if (payload.length !== TRANSACTION_ID_BYTES) {
+    fail(
+      ControlErrorCode.MalformedPayload,
+      `${what} payload length ${payload.length} != ${TRANSACTION_ID_BYTES} (bare transaction id)`,
+    );
+  }
+  return transactionIdToHex(payload, 0);
+}
+
+/** Encode a TRANSACTION_PAUSE payload — the paused transaction's id. */
+export function encodeTransactionPause(transactionId: string): Uint8Array {
+  return encodeTransactionIdPayload(transactionId);
+}
+
+/** Decode a TRANSACTION_PAUSE payload; strict length check. */
+export function decodeTransactionPause(payload: Uint8Array): string {
+  return decodeTransactionIdPayload("TRANSACTION_PAUSE", payload);
+}
+
+/** Encode a TRANSACTION_ABORT payload — the abandoned transaction's id. */
+export function encodeTransactionAbort(transactionId: string): Uint8Array {
+  return encodeTransactionIdPayload(transactionId);
+}
+
+/** Decode a TRANSACTION_ABORT payload; strict length check. */
+export function decodeTransactionAbort(payload: Uint8Array): string {
+  return decodeTransactionIdPayload("TRANSACTION_ABORT", payload);
+}
+
+/**
+ * Encode a TRANSACTION_COMPLETED payload — the completed transaction's id.
+ * Same shape as TRANSACTION_PAUSE / TRANSACTION_ABORT (a bare 16-byte
+ * transaction id); the frame type carries the meaning.
+ */
+export function encodeTransactionCompleted(transactionId: string): Uint8Array {
+  return encodeTransactionIdPayload(transactionId);
+}
+
+/** Decode a TRANSACTION_COMPLETED payload; strict length check. */
+export function decodeTransactionCompleted(payload: Uint8Array): string {
+  return decodeTransactionIdPayload("TRANSACTION_COMPLETED", payload);
 }

@@ -7,11 +7,11 @@
  * - {@link EstablishHandler}: peer Establish request handler
  */
 
-import type { XacppTransport } from "./transport";
-import type { XacppCommand } from "./commands";
-import type { EffectiveCapabilities } from "./capability";
-import type { XacppActivityEvent } from "./events";
-import type { XacppResponse } from "./message";
+import type { XacppTransport } from "../carrier/transport";
+import type { XacppCommand } from "../wire/commands";
+import type { EffectiveCapabilities } from "../wire/capability";
+import type { XacppActivityEvent } from "../wire/events";
+import type { XacppResponse } from "../wire/message";
 
 // ---- Establish Decision ----
 
@@ -29,6 +29,15 @@ export type EstablishDecision =
  * Each logical session holds one implementation, processing Commands and Events from the peer.
  */
 export interface XacppSessionHandler {
+  /**
+   * Declares this handler answers the fetch command family (SPEC §8.2).
+   * Absent/false (the default): the peer answers fetch-family commands
+   * with `fetch_unavailable` loudly, without touching `onCommand`. A
+   * loaded fetch responder ({@link FetchService}, or a hand-rolled
+   * responder) declares `true` and receives the commands untouched.
+   */
+  readonly isFetchResponder?: boolean;
+
   /** Handle Command. */
   onCommand(command: XacppCommand): Promise<XacppResponse>;
 

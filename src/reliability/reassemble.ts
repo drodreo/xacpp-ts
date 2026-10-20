@@ -8,14 +8,15 @@
  * (bytes beyond `total_len`) and `total_len` mismatches are protocol
  * violations.
  *
- * Time-injected: no internal timers. {@link TransactionReassembler.push}
- * takes `now` to timestamp activity; stale sweeps are driven by the
- * caller via {@link TransactionReassembler.reapStale}(now).
+ * Time-injected: `push` takes `now` for validation symmetry only —
+ * slots live until delivered (`take`) or explicitly discarded
+ * (`discard`); there is no stale sweep (SPEC §5: incomplete slots are
+ * the recovery adjudication surface and are never reaped by time).
  */
 
-import { CONTROL_FRAME_MAX, TRANSACTION_ID_SIZE } from "./frame";
-import type { Frame } from "./frame";
-import type { AckEntry, NackEntry } from "./control";
+import { CONTROL_FRAME_MAX, TRANSACTION_ID_SIZE } from "../wire/frame";
+import type { Frame } from "../wire/frame";
+import type { AckEntry, NackEntry } from "../wire/control";
 
 /** Error raised on transaction-level protocol violations (receiver side). */
 export class ReassemblyError extends Error {
@@ -25,9 +26,6 @@ export class ReassemblyError extends Error {
   }
 }
 
-/** Default retention for incomplete transactions before a stale sweep may drop them (SPEC §5 recommendation). */
-export const DEFAULT_STALE_RETENTION_MS = 120_000;
-
 /**
  * Max missing seqs per NACK entry so that one entry always fits the
  * 16 KiB control-frame cap (SPEC §4):
@@ -36,16 +34,6 @@ export const DEFAULT_STALE_RETENTION_MS = 120_000;
 export const NACK_MISSING_SEQS_MAX = Math.floor(
   (CONTROL_FRAME_MAX - 1 - TRANSACTION_ID_SIZE - 2) / 4,
 );
-
-export interface ReassemblerOptions {
-  /**
-   * Retention window for *incomplete* transactions: a slot whose last
-   * new frame is older than this (per the caller's clock) is dropped by
-   * `reapStale`. Completed-but-undelivered slots are never auto-reaped.
-   * Default: {@link DEFAULT_STALE_RETENTION_MS} (120 s).
-   */
-  staleRetentionMs?: number;
-}
 
 /** Result of feeding one frame into the reassembler. */
 export interface PushOutcome {
@@ -71,16 +59,16 @@ interface Slot {
   receivedBytes: number;
   /** Highest seq seen so far; -1 when nothing received. */
   highestReceivedSeq: number;
-  /** Caller-clock ms of the last NEW frame arrival (duplicates do not refresh). */
-  lastActivityAt: number;
 }
 
 /** Contiguous frontier walk: returns the first missing seq and the byte count of the contiguous prefix. */
 function frontier(slot: Slot): { next: number; bytes: number } {
   let seq = 0;
   let bytes = 0;
-  while (slot.frames.has(seq)) {
-    bytes += slot.frames.get(seq)!.length;
+  for (;;) {
+    const payload = slot.frames.get(seq);
+    if (payload === undefined) break;
+    bytes += payload.length;
     seq++;
   }
   return { next: seq, bytes };
@@ -93,15 +81,6 @@ function isComplete(slot: Slot): boolean {
 
 export class TransactionReassembler {
   private readonly slots = new Map<string, Slot>();
-  private readonly staleRetentionMs: number;
-
-  constructor(opts?: ReassemblerOptions) {
-    const retention = opts?.staleRetentionMs ?? DEFAULT_STALE_RETENTION_MS;
-    if (!Number.isInteger(retention) || retention < 0) {
-      throw new RangeError(`staleRetentionMs must be a non-negative integer, got: ${retention}`);
-    }
-    this.staleRetentionMs = retention;
-  }
 
   /** Number of live slots (complete-but-undelivered included). */
   get pendingCount(): number {
@@ -117,6 +96,32 @@ export class TransactionReassembler {
   isComplete(transactionId: string): boolean {
     const slot = this.slots.get(transactionId);
     return slot !== undefined && isComplete(slot);
+  }
+
+  /**
+   * Contiguous-frontier accessor for the streaming receive path (read-only):
+   * `seq` is the next missing seq (== count of the contiguous prefix),
+   * `bytes` the prefix's byte total. `null` for unknown transactions.
+   */
+  frontierOf(transactionId: string): { seq: number; bytes: number } | null {
+    const slot = this.slots.get(transactionId);
+    if (slot === undefined) return null;
+    const { next, bytes } = frontier(slot);
+    return { seq: next, bytes };
+  }
+
+  /** Declared transaction total of a live slot; `null` when unknown. */
+  totalLenOf(transactionId: string): number | null {
+    return this.slots.get(transactionId)?.totalLen ?? null;
+  }
+
+  /**
+   * Peek one held frame by seq without consuming anything (read-only,
+   * streaming receive path). `null` when the transaction is unknown or the
+   * seq was never received.
+   */
+  frameAt(transactionId: string, seq: number): Uint8Array | null {
+    return this.slots.get(transactionId)?.frames.get(seq) ?? null;
   }
 
   /**
@@ -138,7 +143,6 @@ export class TransactionReassembler {
         frames: new Map(),
         receivedBytes: 0,
         highestReceivedSeq: -1,
-        lastActivityAt: now,
       };
       this.slots.set(frame.transactionId, slot);
     } else if (slot.totalLen !== frame.totalLen) {
@@ -170,7 +174,6 @@ export class TransactionReassembler {
     slot.frames.set(frame.seq, frame.payload);
     slot.receivedBytes += frame.payload.length;
     if (frame.seq > slot.highestReceivedSeq) slot.highestReceivedSeq = frame.seq;
-    slot.lastActivityAt = now;
 
     return {
       transactionId: frame.transactionId,
@@ -199,7 +202,12 @@ export class TransactionReassembler {
     const out = new Uint8Array(slot.totalLen);
     let offset = 0;
     for (let seq = 0; seq < next; seq++) {
-      const payload = slot.frames.get(seq)!;
+      const payload = slot.frames.get(seq);
+      if (payload === undefined) {
+        throw new ReassemblyError(
+          `transaction ${transactionId} lost frame ${seq} while assembling (frontier seq ${next})`,
+        );
+      }
       out.set(payload, offset);
       offset += payload.length;
     }
@@ -264,28 +272,25 @@ export class TransactionReassembler {
   }
 
   /**
-   * Drop incomplete transactions whose last new frame is older than the
-   * retention window (caller clock). Completed-but-undelivered slots are
-   * never auto-reaped — delivering them is the caller's duty. Returns the
-   * removed transaction ids in slot order.
+   * Explicitly discard a slot: the recovery cross-check (the holder's
+   * declaration did not cover this still-open slot), a peer ERROR
+   * `transaction_expired`, or a local TRANSACTION_ABORT.
    */
-  reapStale(now: number): string[] {
-    if (!Number.isSafeInteger(now) || now < 0) {
-      throw new RangeError(`now must be a non-negative safe integer, got: ${now}`);
-    }
-    const removed: string[] = [];
-    for (const [transactionId, slot] of this.slots) {
-      if (isComplete(slot)) continue;
-      if (now - slot.lastActivityAt > this.staleRetentionMs) {
-        this.slots.delete(transactionId);
-        removed.push(transactionId);
-      }
-    }
-    return removed;
-  }
-
-  /** Explicitly discard a slot (e.g. after the holder answered `rejected`). */
   discard(transactionId: string): boolean {
     return this.slots.delete(transactionId);
+  }
+
+  /**
+   * Ids of all open (incomplete) receive slots — the recovery
+   * cross-check surface: an incomplete slot the holder did not declare can
+   * never complete and is cancelled. Completed-but-undelivered slots are
+   * excluded (they need nothing more from the holder).
+   */
+  incompleteTransactions(): string[] {
+    const out: string[] = [];
+    for (const slot of this.slots.values()) {
+      if (!isComplete(slot)) out.push(slot.transactionId);
+    }
+    return out;
   }
 }

@@ -87,6 +87,12 @@ export type XacppResponse =
   | { kind: "establish_reject"; reason: string }
   /** Business: generic response. */
   | { kind: "generic"; name: string; data: unknown }
+  /**
+   * Protocol: fetch accepted — the bytes follow as a DATA_BINARY
+   * transaction whose id IS `txid` (SPEC §8.2). sha256/sizeBytes are
+   * computed by the serving side from the actual bytes.
+   */
+  | { kind: "fetch_ready"; txid: string; sha256: string; sizeBytes: number; mime: string }
   /** Error. */
   | { kind: "error"; code: string; message: string };
 

@@ -1,12 +1,12 @@
 import * as net from "node:net";
 import type { RequestHandler, XacppTransport } from "./transport";
-import type { XacppEnvelope, XacppRequest, XacppResponse } from "./message";
-import { XacppError } from "./message";
-import { ClosedSignal, Egress } from "./egress";
-import type { EgressHost, PendingMap } from "./egress";
-import { FrameDecoder, FrameType, encodeFrame, makeFrame } from "./frame";
-import type { Frame } from "./frame";
-import type { TransferActivityHandlers, TransferWiring } from "./transfer";
+import type { XacppEnvelope, XacppRequest, XacppResponse } from "../wire/message";
+import { XacppError } from "../wire/message";
+import { ClosedSignal, Egress } from "../session/egress";
+import type { EgressHost, PendingMap } from "../session/egress";
+import { FrameDecoder, FrameType, encodeFrame, makeFrame } from "../wire/frame";
+import type { Frame } from "../wire/frame";
+import type { TransferActivityHandlers, TransferWiring } from "../transfer";
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -94,24 +94,12 @@ export class SocketTransport implements XacppTransport, TransferWiring {
   async connect(): Promise<void> {
     if (this._exhausted || this._connected) throw XacppError.alreadyConnected();
 
-    if (!this.socket) {
-      // Client mode: create new socket and connect
-      if (this.port === undefined) throw XacppError.alreadyConnected();
-      this.socket = new net.Socket();
-      await new Promise<void>((resolve, reject) => {
-        const sock = this.socket!;
-        const onError = (err: Error) => { cleanup(); reject(new Error(`connect failed: ${err.message}`)); };
-        const onConnect = () => { cleanup(); resolve(); };
-        const cleanup = () => { sock.removeListener("error", onError); sock.removeListener("connect", onConnect); };
-        sock.once("error", onError);
-        sock.once("connect", onConnect);
-        sock.connect(this.port!, this.host!, () => {});  // connect event triggers onConnect
-      });
-    }
+    const sock = this.socket ?? (await this.connectClientSocket());
+    this.socket = sock;
 
     // Common to both modes: start the streaming frame decoder receiver.
-    const sock = this.socket!;
-    this.decoder = new FrameDecoder();
+    const decoder = new FrameDecoder();
+    this.decoder = decoder;
     this.decoderDead = false;
     this.readerGone = false;
 
@@ -119,7 +107,7 @@ export class SocketTransport implements XacppTransport, TransferWiring {
       if (this.decoderDead) return;
       let frames: Frame[];
       try {
-        frames = this.decoder!.push(new Uint8Array(chunk));
+        frames = decoder.push(new Uint8Array(chunk));
       } catch (e) {
         // Protocol violation (version / CRC / oversize): the stream cannot
         // be resynced — connection-level throw semantics = connection dead.
@@ -157,6 +145,30 @@ export class SocketTransport implements XacppTransport, TransferWiring {
     this._connected = true;
 
     console.debug("[xacpp:socket] connected");
+  }
+
+  /**
+   * Client mode: create a socket and connect to the configured endpoint.
+   * The socket is published on `this.socket` before the connect attempt —
+   * a failed connect leaves the same state as before (a dead socket).
+   */
+  private async connectClientSocket(): Promise<net.Socket> {
+    const port = this.port;
+    if (port === undefined) throw XacppError.alreadyConnected();
+    const host = this.host;
+    const client = new net.Socket();
+    this.socket = client;
+    await new Promise<void>((resolve, reject) => {
+      const onError = (err: Error) => { cleanup(); reject(new Error(`connect failed: ${err.message}`)); };
+      const onConnect = () => { cleanup(); resolve(); };
+      const cleanup = () => { client.removeListener("error", onError); client.removeListener("connect", onConnect); };
+      client.once("error", onError);
+      client.once("connect", onConnect);
+      // No host configured → Node's default host (same call shape as before).
+      if (host === undefined) client.connect(port, () => {});
+      else client.connect(port, host, () => {});
+    });
+    return client;
   }
 
   async disconnect(): Promise<void> {

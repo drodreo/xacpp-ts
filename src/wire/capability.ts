@@ -30,7 +30,13 @@ export function computeEffectiveCapabilities(local: Capabilities, remote: Capabi
 }
 
 function extractNames(schemas?: Record<string, unknown>[]): string[] {
-  return (schemas ?? []).map(s => s.name as string).filter(Boolean);
+  const names: string[] = [];
+  for (const schema of schemas ?? []) {
+    const name = schema.name;
+    // The carrier is peer-supplied JSON: only a string name is a name.
+    if (typeof name === "string" && name.length > 0) names.push(name);
+  }
+  return names;
 }
 
 // ---- Command declaration schema (typed view of `Capabilities.commands`) ----
@@ -96,7 +102,11 @@ export interface CommandDeclaration {
  * so TS cannot prove overlap; `name` presence is the caller's contract duty.
  */
 export function parseCommandDeclaration(value: Record<string, unknown>): CommandDeclaration {
-  return value as unknown as CommandDeclaration;
+  // Exemption (unchecked cast): the carrier is peer-supplied JSON with no
+  // fixed shape — TS cannot prove the overlap, so the typed view needs the
+  // `unknown` bridge. The raw object is returned as-is (unknown fields
+  // included); `name` presence is the caller's contract duty.
+  return value as unknown as CommandDeclaration; // unchecked cast: untyped wire carrier (see above)
 }
 
 /**

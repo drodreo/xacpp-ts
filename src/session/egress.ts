@@ -11,8 +11,8 @@
  *   queued — the caller never blocks on the wire (event path).
  */
 
-import { XacppError } from "./message";
-import type { XacppResponse } from "./message";
+import { XacppError } from "../wire/message";
+import type { XacppResponse } from "../wire/message";
 
 /** Minimal writer surface shared by socket and stdio transports. */
 export interface EgressWriter {
@@ -176,7 +176,8 @@ export class Egress {
 
   private async drain(): Promise<void> {
     while (this.queue.length > 0) {
-      const item = this.queue.shift()!;
+      const item = this.queue.shift();
+      if (item === undefined) break;
       if (item.kind === "close") {
         this.shutdownWriter();
         return;

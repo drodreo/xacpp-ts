@@ -1,4 +1,4 @@
-export type { XacppCommand } from "./commands";
+export type { XacppCommand } from "./wire/commands";
 export type {
   NewActivityPayload,
   LastActivityPayload,
@@ -9,34 +9,38 @@ export type {
   CompactActivityPayload,
   SetActivityModePayload,
   AvailableActivitiesResponse,
-} from "./commands";
-export { genericCommand, commandName } from "./commands";
-export type { ActivityRef } from "./activity-ref";
-export * from "./events";
-export { XacppError, acknowledge, genericResponse, errorResponse } from "./message";
-export type { ActivityInfo, XacppRequest, XacppResponse, XacppEnvelope } from "./message";
-export type { Capabilities, EffectiveCapabilities } from "./capability";
+} from "./wire/commands";
+export { genericCommand, commandName } from "./wire/commands";
+export type { ActivityRef } from "./wire/activity-ref";
+export * from "./wire/events";
+export { XacppError, acknowledge, genericResponse, errorResponse } from "./wire/message";
+export type { ActivityInfo, XacppRequest, XacppResponse, XacppEnvelope } from "./wire/message";
+export type { Capabilities, EffectiveCapabilities } from "./wire/capability";
 export type {
   CommandDeclaration,
   CommandDispatcher,
   EvaluationPolicy,
   RequireToolCall,
-} from "./capability";
+} from "./wire/capability";
 export {
   parseCommandDeclaration,
   isToolFacing,
   requireToolCall,
   hasCompactScope,
-} from "./capability";
-export { XacppPeer, PeerState } from "./peer";
-export { XacppSession } from "./session";
-export { SocketTransport } from "./socket-transport";
-export { StdioTransport } from "./stdio-transport";
-export type { XacppTransport, RequestHandler } from "./transport";
-export type { XacppSessionHandler, EstablishHandler, EstablishDecision, NegotiateHandler } from "./handler";
+} from "./wire/capability";
+export { XacppPeer, PeerState } from "./session/peer";
+export { XacppSession } from "./session/session";
+
+// Fetch kernel — stateless resource pull (fetch command + fetch_ready; SPEC §8)
+export { FETCH_NOT_FOUND, FETCH_REFUSED, FETCH_UNAVAILABLE, fetchNotFound, fetchRefused } from "./wire/fetch";
+export type { FetchReady } from "./wire/fetch";
+export { SocketTransport } from "./carrier/socket";
+export { StdioTransport } from "./carrier/stdio";
+export type { XacppTransport, RequestHandler } from "./carrier/transport";
+export type { XacppSessionHandler, EstablishHandler, EstablishDecision, NegotiateHandler } from "./session/handler";
 
 // Binary frame codec (protocol v1.0, docs/SPEC.md §3/§4)
-export type { Frame } from "./frame";
+export type { Frame } from "./wire/frame";
 export {
   FrameType,
   FrameDecoder,
@@ -53,7 +57,7 @@ export {
   DATA_JSON_FRAME_MAX,
   DATA_BINARY_FRAME_MAX,
   DEFAULT_DECODE_BUFFER_CAP,
-} from "./frame";
+} from "./wire/frame";
 
 // Control frame payload codecs (docs/SPEC.md §5)
 export type {
@@ -63,7 +67,7 @@ export type {
   ResumeResponseEntry,
   Heartbeat,
   ProtocolErrorInfo,
-} from "./control";
+} from "./wire/control";
 export {
   ControlError,
   ControlErrorCode,
@@ -82,29 +86,33 @@ export {
   decodeHeartbeat,
   encodeError,
   decodeError,
-} from "./control";
+  encodeTransactionPause,
+  decodeTransactionPause,
+  encodeTransactionAbort,
+  decodeTransactionAbort,
+  encodeTransactionCompleted,
+  decodeTransactionCompleted,
+} from "./wire/control";
 
 // Transaction reassembler — receiver-side reliability (docs/SPEC.md §3/§5)
-export { TransactionReassembler, ReassemblyError, DEFAULT_STALE_RETENTION_MS, NACK_MISSING_SEQS_MAX } from "./reassemble";
-export type { ReassemblerOptions, PushOutcome } from "./reassemble";
+export { TransactionReassembler, ReassemblyError, NACK_MISSING_SEQS_MAX } from "./reliability/reassemble";
+export type { PushOutcome } from "./reliability/reassemble";
 
 // Transaction sender — sender-side reliability (docs/SPEC.md §5)
 export {
   TransactionSender,
   SenderError,
   DEFAULT_WORKING_FRAME_BYTES,
-  DEFAULT_COPY_RETENTION_MS,
   DEFAULT_INITIAL_TIMEOUT_MS,
   DEFAULT_MAX_TIMEOUT_MS,
   DEFAULT_BACKPRESSURE_CAP_BYTES,
-} from "./transaction";
+} from "./reliability/transaction";
 export type {
   SenderOptions,
   OpenResult,
   AckOutcome,
-  ResumeResponseOutcome,
-  ResumeAnswer,
-} from "./transaction";
+  ResumeVerdictOutcome,
+} from "./reliability/transaction";
 
 // Transfer session — session-carried binary reliability (docs/SPEC.md §5)
 export {
@@ -122,4 +130,25 @@ export type {
   TickOutcome,
   BinarySendResult,
   BinaryHandler,
+  BinarySink,
+  BinarySinkMeta,
+  BinaryStream,
+  BinaryStreamHandler,
+  StreamEndReason,
 } from "./transfer";
+
+// Fetch extension — assembly over the kernel (SPEC §8 contract firewall).
+// Not part of the wire protocol:
+// the data plane stays on the kernel's bare BinaryStream/BinarySink objects.
+export {
+  FetchPuller,
+  FetchService,
+  FetchError,
+  bytesProvider,
+  fileProvider,
+  fetchVerify,
+  fetchPause,
+  fetchResume,
+  fetchAbort,
+} from "./ext/fetch";
+export type { FetchErrorKind, FetchProvider, ResolvedResource } from "./ext/fetch";

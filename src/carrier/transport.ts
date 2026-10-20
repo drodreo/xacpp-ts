@@ -39,7 +39,7 @@
  * Upper layer only needs one rule: method throw means connection error.
  */
 
-import type { XacppRequest, XacppResponse } from "./message";
+import type { XacppRequest, XacppResponse } from "../wire/message";
 
 /** Transport layer request handler callback type. */
 export type RequestHandler = (
