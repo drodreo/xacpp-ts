@@ -42,6 +42,7 @@ Three-layer design, mirroring xacpp-rs:
 | File | Responsibility |
 |------|---------------|
 | `src/transport.ts` | `XacppTransport` interface (`send` / `sendFaf` / `onRequest` / `onClosed`) + `RequestHandler` type |
+| `src/fetch.ts` | Fetch channel types (FetchHandler / FetchOutcome / FetchServerFacet) + fetch error code registry |
 | `src/handler.ts` | `XacppSessionHandler` + `EstablishHandler` interfaces |
 | `src/session.ts` | `XacppSession` class |
 | `src/peer.ts` | `XacppPeer` class + `PeerState` enum |
@@ -95,6 +96,7 @@ Build tool is **rslib** (not tsc). Do not add `tsc` build steps.
 - `tests/serde.test.ts` — Serialization round-trip
 - `tests/socket-concurrent.test.ts` — SocketTransport concurrency + ordered egress + closed notification
 - `tests/egress-wire.test.ts` — Wire-level egress order/throughput/stability, raw TCP peer
+- `tests/fetch.test.ts` — Fetch channel matrix (SPEC §8, wire format byte-exactness)
 
 Must stay in sync with xacpp-rs test suite.
 
