@@ -190,7 +190,14 @@ export class SocketTransport implements XacppTransport, TransferWiring {
       if (this.onData) this.socket.removeListener("data", this.onData);
       if (this.onSocketClosed) this.socket.removeListener("close", this.onSocketClosed);
       if (this.onSocketEnded) this.socket.removeListener("end", this.onSocketEnded);
-      if (this.onSocketError) this.socket.removeListener("error", this.onSocketError);
+      if (this.onSocketError) {
+        this.socket.removeListener("error", this.onSocketError);
+        // The egress drain flushes asynchronously past disconnect(); a late
+        // write-after-FIN makes Node destroy the socket and re-emit 'error'.
+        // Keep a resident swallow on this intentionally dead connection so a
+        // belated EPIPE/reset can never escape as an uncaught exception.
+        this.socket.on("error", () => {});
+      }
     }
     this.onData = null;
     this.onSocketClosed = null;

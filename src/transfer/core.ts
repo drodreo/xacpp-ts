@@ -217,8 +217,32 @@ export class TransferSession {
    * sends (RESUME, recovery discipline — gated until the receiver's
    * verdicts arrive). The session auto-unwires when the transport closes
    * — all state survives.
+   *
+   * Declaration timing contract (SPEC §5): wiring here DECLARES — the
+   * caller only wires when the peer's transfer plane already exists
+   * (direct-transport consumers, or the responder wiring inside
+   * onEstablish). The initiator-at-connect path must NOT declare at
+   * wire-up (the responder's transfer plane does not exist yet and a
+   * dropped declaration deadlocks the holder); the peer uses
+   * `wireWithoutDeclaration` there and fires `declarePendingSends` once
+   * the establish handshake completes.
    */
   wire(transport: XacppTransport & TransferWiring): void {
+    this.attachWiring(transport);
+    this.declarePendingSends();
+  }
+
+  /**
+   * @internal Wire without sending the RESUME declaration (gate still
+   * armed). Peer-internal: the initiator wires at connect, before the
+   * responder's transfer plane exists; the declaration is fired by the
+   * peer once the establish handshake completes.
+   */
+  wireWithoutDeclaration(transport: XacppTransport & TransferWiring): void {
+    this.attachWiring(transport);
+  }
+
+  private attachWiring(transport: XacppTransport & TransferWiring): void {
     if (this.binding !== null) throw XacppError.invalidState("transfer session already wired to a transport");
     const writeData = (frame: Frame) => transport.writeDataFrame(frame);
     const binding = new ReliabilityBinding(this, {
@@ -237,13 +261,11 @@ export class TransferSession {
       onFrame: (frame) => binding.handleWireFrame(frame),
     });
     this.unwireOnClose = transport.onClosed(() => this.unwire());
-    // Recovery discipline: the holder declares its pending sends (gated
-    // against retransmission until the verdicts arrive); a receiver with
-    // nothing pending declares nothing. The resume instruction is the
-    // receiver's RESUME_RESPONSE — blind retransmission of retained copies
-    // across a reconnect is retired.
-    const declaration = this.buildResumeDeclaration(Date.now());
-    if (declaration !== null) transport.writeControlFrame(declaration);
+    // Recovery discipline: arm the reconnect gate on every pending send —
+    // they retransmit nothing until the receiver's per-transaction verdict
+    // arrives (declarePending is idempotent; the declaration frame itself
+    // is sent by `wire` now or by `declarePendingSends` later).
+    this.sender.declarePending(Date.now());
     // The connection is live again: stalled streams resume on the SAME
     // object once the RESUME handshake completes (the response clears the
     // flag too — this covers request-less stalls, e.g. pure senders).
@@ -809,14 +831,30 @@ export class TransferSession {
 
   /**
    * RESUME declaration frame for every pending send (recovery discipline:
-   * sent on wire-up; the entries gate the copies against retransmission
-   * until the receiver's verdicts arrive). Returns null when there is
+   * the entries gate the copies against retransmission until the
+   * receiver's verdicts arrive; SENT only via `declarePendingSends` — see
+   * that method for the timing contract). Returns null when there is
    * nothing pending — an empty declaration is never emitted.
    */
   buildResumeDeclaration(now: number): Uint8Array | null {
     const entries = this.sender.declarePending(now);
     if (entries.length === 0) return null;
     return encodeFrame(makeFrame(CONTROL_PAYLOAD_FRAME_TYPES.resumeRequest, encodeResumeRequest(entries)));
+  }
+
+  /**
+   * Recovery discipline: send the RESUME declaration for every pending
+   * send (declarePending is idempotent — re-declaring re-arms the same
+   * gate). Fired by the peer when the establish handshake completes (the
+   * only moment BOTH transfer planes are live on an establish topology),
+   * or by a consumer-driven `XacppSession.wire` — which by contract happens
+   * when the peer is already wired (responder's onEstablish).
+   */
+  declarePendingSends(): void {
+    const wiring = this.wiring;
+    if (wiring === null) return;
+    const declaration = this.buildResumeDeclaration(Date.now());
+    if (declaration !== null) wiring.writeControlFrame(declaration);
   }
 
   /**

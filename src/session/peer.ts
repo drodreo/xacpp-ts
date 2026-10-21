@@ -185,7 +185,12 @@ export class XacppPeer {
     if (this.session) {
       const transport = this.transport;
       if (isTransferWiring(transport)) {
-        this.session.wire(transport);
+        // Wire WITHOUT the recovery declaration: the responder builds and
+        // wires its session only inside the upcoming establish, so a
+        // declaration at connect would be dropped by the not-yet-wired
+        // peer and deadlock the holder; the peer fires it when establish
+        // completes.
+        this.session.wireWithoutDeclaration(transport);
       } else {
         console.warn(
           "[xacpp:peer] transport carries no binary channel — the transfer session stays unwired",
@@ -251,6 +256,10 @@ export class XacppPeer {
       this.sessions.set(response.sessionId, handler);
       const session = this.sessionForEstablish(response.sessionId);
       session.bindIdentity(response.sessionId, response.credentials);
+      // Recovery discipline: the handshake is complete and the responder
+      // wired its transfer plane inside onEstablish — declare pending
+      // sends now (a declaration at connect would have been dropped).
+      session.declarePendingSends();
       return session;
     }
 
@@ -265,6 +274,9 @@ export class XacppPeer {
         this.sessions.set(confirmResponse.sessionId, handler);
         const session = this.sessionForEstablish(confirmResponse.sessionId);
         session.bindIdentity(confirmResponse.sessionId, confirmResponse.credentials);
+        // Recovery discipline: handshake complete (challenge path) —
+        // declare pending sends now that both transfer planes are wired.
+        session.declarePendingSends();
         return session;
       }
 

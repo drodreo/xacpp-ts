@@ -86,12 +86,45 @@ export class XacppSession {
    * transfer state (binding, clock, recovery declaration). Auto-detaches
    * when the transport closes; wiring the same session into a replacement
    * transport resumes interrupted transfers.
+   *
+   * Declaration timing contract (SPEC §5): wiring DECLARES pending sends
+   * — a consumer-driven wire (the responder side inside onEstablish, or
+   * direct-transport consumers) only runs when the peer's transfer plane
+   * is already live. The peer's own initiator-side path wires at connect
+   * via `wireWithoutDeclaration` and declares only after the establish
+   * handshake completes.
    */
   wire(transport: XacppTransport & TransferWiring): void {
     if (this.wiredTransport !== null) throw XacppError.invalidState("session already wired to a transport");
     this.wiredTransport = transport;
     this.transfer.wire(transport);
     this.unwireOnClose = transport.onClosed(() => this.unwire());
+  }
+
+  /**
+   * Wire WITHOUT the recovery declaration: used by the peer at connect
+   * time on the initiator side — the responder's session does not exist
+   * until the upcoming establish, so a declaration now would be dropped by
+   * the not-yet-wired peer, deadlocking the holder. The peer fires
+   * `declarePendingSends` once establish completes.
+   * @internal
+   */
+  wireWithoutDeclaration(transport: XacppTransport & TransferWiring): void {
+    if (this.wiredTransport !== null) throw XacppError.invalidState("session already wired to a transport");
+    this.wiredTransport = transport;
+    this.transfer.wireWithoutDeclaration(transport);
+    this.unwireOnClose = transport.onClosed(() => this.unwire());
+  }
+
+  /**
+   * Recovery discipline trigger for the peer: send the RESUME declaration
+   * for every pending send. Fired when the establish handshake completes —
+   * the only moment both transfer planes are wired on an establish
+   * topology. Idempotent.
+   * @internal
+   */
+  declarePendingSends(): void {
+    this.transfer.declarePendingSends();
   }
 
   /** Detach from the current connection (idempotent; identity and transfer state survive). */
