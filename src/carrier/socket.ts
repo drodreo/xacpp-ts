@@ -175,6 +175,13 @@ export class SocketTransport implements XacppTransport, TransferWiring {
     this._exhausted = true;
     this._connected = false;
 
+    // SPEC §5 disconnect discipline: the transfer mount detaches from the
+    // dead transport immediately — frames still queued in this connection's
+    // egress may keep arriving at the peer's reader, and anything the peer
+    // flushes back over the dead link finds no hooks here and is dropped,
+    // never routed into session state.
+    this.transferHandlers = null;
+
     // Shut the egress down (queued frames flush FIFO before the writer closes).
     this.egress?.close();
     this.egress = null;
@@ -377,6 +384,11 @@ export class SocketTransport implements XacppTransport, TransferWiring {
     if (this.readerGone) return;
     this.readerGone = true;
     this._connected = false;
+    // SPEC §5 disconnect discipline: the reader observed the connection's
+    // death — detach the transfer hooks now (the earliest point this end
+    // can know). Frames arriving afterwards find no mount and are dropped,
+    // never routed into session state.
+    this.transferHandlers = null;
     this.rejectAllPending();
     this.egress?.close();
     this.egress = null;

@@ -89,6 +89,8 @@ export const DEFAULT_SILENCE_TIMEOUT_MS = 90_000;
 export const DEFAULT_ACK_BATCH_FRAMES = 64;
 /** Incremental ACK batch: … or once this much time elapsed since the last ACK. */
 export const DEFAULT_ACK_BATCH_INTERVAL_MS = 500;
+/** RESUME declaration verdict timeout: an unanswered declaration is retransmitted (SPEC §5). */
+export const DEFAULT_RESUME_VERDICT_TIMEOUT_MS = 2_000;
 /** Period of the binding's clock that drives the session. */
 export const DEFAULT_RELIABILITY_TICK_MS = 100;
 function requirePositiveInt(name: string, value: number): void {
@@ -104,6 +106,7 @@ export class TransferSession {
   private readonly silenceTimeoutMs: number;
   private readonly ackBatchFrames: number;
   private readonly ackBatchIntervalMs: number;
+  private readonly resumeVerdictTimeoutMs: number;
 
   /** Per-transaction completion callbacks (survive across connections). */
   private readonly completions = new Map<string, (result: BinarySendResult) => void>();
@@ -150,10 +153,12 @@ export class TransferSession {
     this.silenceTimeoutMs = opts?.silenceTimeoutMs ?? DEFAULT_SILENCE_TIMEOUT_MS;
     this.ackBatchFrames = opts?.ackBatchFrames ?? DEFAULT_ACK_BATCH_FRAMES;
     this.ackBatchIntervalMs = opts?.ackBatchIntervalMs ?? DEFAULT_ACK_BATCH_INTERVAL_MS;
+    this.resumeVerdictTimeoutMs = opts?.resumeVerdictTimeoutMs ?? DEFAULT_RESUME_VERDICT_TIMEOUT_MS;
     requirePositiveInt("heartbeatIntervalMs", this.heartbeatIntervalMs);
     requirePositiveInt("silenceTimeoutMs", this.silenceTimeoutMs);
     requirePositiveInt("ackBatchFrames", this.ackBatchFrames);
     requirePositiveInt("ackBatchIntervalMs", this.ackBatchIntervalMs);
+    requirePositiveInt("resumeVerdictTimeoutMs", this.resumeVerdictTimeoutMs);
   }
 
   /**
@@ -319,9 +324,16 @@ export class TransferSession {
    * parked in the egress queues (pause-hold or global backpressure): the
    * tail frame has not left yet, and announcing now would tell the peer
    * "no more bytes" while bytes are still coming. The peer then completes
-   * through the ordinary byte-complete path.
+   * through the ordinary byte-complete path. It is likewise skipped while
+   * the transaction is gated awaiting the receiver's resume verdict (SPEC
+   * §5: a gated transaction SENDS NOTHING) — the closure rides the verdict
+   * outcome instead (`Resumed` retransmits the frames and the byte count
+   * completes it; `Unknown`/`Rejected` closes by holder-side adjudication).
    */
   sinkAnnounceCompleted(transactionId: string): void {
+    if (this.sender.isAwaitingResume(transactionId)) {
+      return;
+    }
     if (!this.sinkFramesEgressed(transactionId)) {
       console.warn(
         "[xacpp:reliability] transaction %s finished with frames still parked — completion not announced",
@@ -522,6 +534,18 @@ export class TransferSession {
       );
       return [];
     }
+    if (outcome.slotlessDropped) {
+      // SPEC §3/§5: a slotless id with `seq > 0` — late retransmission of
+      // a settled transaction or an unannounced stream. Dropped — no
+      // slot, no ACK, no NACK, no stream, no reply: the holder's closure
+      // signal is the RESUME verdict, never a data-frame reply.
+      console.debug(
+        "[xacpp:reliability] dropped slotless DATA_BINARY frame (tx %s seq %d) — not reassembled",
+        frame.transactionId,
+        frame.seq,
+      );
+      return [];
+    }
 
     const controlFrames: Uint8Array[] = [];
 
@@ -565,7 +589,7 @@ export class TransferSession {
     if (outcome.completed) {
       // The stream owns the transaction when it streamed it from the start
       // (existed before this frame) or the transaction arrived entirely
-      // under the current handler (fresh slot). A slot that completed while
+      // under the current handler (a newly opened slot). A slot that completed while
       // nobody streamed it stays with `onBinary`'s exactly-once
       // retro-delivery contract.
       if (this.onBinaryStreamHandler !== null && (streamExistedBefore || !slotExisted) && this.streams.has(frame.transactionId)) {
@@ -669,15 +693,20 @@ export class TransferSession {
 
   /**
    * Receiver side (recovery discipline): adjudicate the holder's
-   * declaration — every declared txid we still hold open answers
-   * `Resumed` (the resume instruction), everything else `Unknown`. The
-   * mirror cross-check cancels open-but-undeclared inbound streams: the
-   * holder no longer holds their copy (aborted or released while
-   * disconnected), so they can never complete — and streams close only on
-   * cancellation or completion. Completed-but-undelivered slots are
-   * excluded (they need nothing more from the holder). Every declaration
-   * is answered with exactly one verdict frame (never silently swallowed);
-   * an empty declaration carries no question and is not answered.
+   * declaration. An **open incomplete** slot answers `Resumed` (the
+   * continuation instruction); everything else answers `Unknown` — a
+   * completed-but-undelivered slot awaits local consumption and needs
+   * nothing more from the holder, and with no terminal trace kept a
+   * consumed-and-delivered transaction and a never-seen one are
+   * indistinguishable. The holder closes those by its own adjudication
+   * (SPEC §5). The mirror cross-check cancels open-but-undeclared inbound
+   * streams: the holder no longer holds their copy (aborted or released
+   * while disconnected), so they can never complete — and streams close
+   * only on cancellation or completion. Completed-but-undelivered slots
+   * are excluded (they need nothing more from the holder). Every
+   * declaration is answered with exactly one verdict frame (never
+   * silently swallowed); an empty declaration carries no question and is
+   * not answered.
    */
   private adjudicateResumeDeclaration(entries: ReturnType<typeof decodeResumeRequest>): TickOutcome {
     if (entries.length === 0) {
@@ -685,7 +714,10 @@ export class TransferSession {
     }
     const verdicts = entries.map((entry) => ({
       transactionId: entry.transactionId,
-      status: this.reassembler.has(entry.transactionId) ? RESUME_STATUS.Resumed : RESUME_STATUS.Unknown,
+      status:
+        this.reassembler.has(entry.transactionId) && !this.reassembler.isComplete(entry.transactionId)
+          ? RESUME_STATUS.Resumed
+          : RESUME_STATUS.Unknown,
     }));
     const declared = new Set(entries.map((entry) => entry.transactionId));
     for (const txid of this.reassembler.incompleteTransactions()) {
@@ -703,9 +735,11 @@ export class TransferSession {
    * Holder side (recovery discipline): apply the receiver's verdicts.
    * `Resumed` lifts the reconnect gate and retransmits every unconfirmed
    * frame (settling writes parked on the gate); `Unknown`/`Rejected`
-   * fails the transfer as a whole — the copy is released and completion
-   * waiters fire unconfirmed (never confirmed: completion remains
-   * final-ACK-only), and parked writes are rejected.
+   * closes the transfer by HOLDER-SIDE ADJUDICATION (SPEC §5): every
+   * frame already sent (tail frame plus the completion announcement) ⇒
+   * confirmed — completion waiters fire with a confirmation terminal;
+   * frames still owed ⇒ failed (failure terminal). Parked writes are
+   * rejected on the failed branch.
    */
   private applyResumeResponses(entries: ReturnType<typeof decodeResumeResponse>, now: number): TickOutcome {
     const dataFrames: Frame[] = [];
@@ -715,6 +749,13 @@ export class TransferSession {
       if (outcome.failed) {
         this.complete(entry.transactionId, { transactionId: entry.transactionId, confirmed: false });
         this.rejectPendingWrites(entry.transactionId);
+        continue;
+      }
+      if (outcome.confirmed) {
+        // Confirmed closure (adjudicated fully-sent): same exact-once
+        // channel as the final ACK — completion waiters fire confirmed.
+        this.complete(entry.transactionId, { transactionId: entry.transactionId, confirmed: true });
+        this.resolvePendingWritesForClosure(entry.transactionId);
         continue;
       }
       // Resumed: retransmit the unconfirmed frames and settle the writes
@@ -811,6 +852,23 @@ export class TransferSession {
     const dataFrames: Frame[] = [];
     dataFrames.push(...this.flushDeferredIfUnpaused());
     dataFrames.push(...this.enqueueDataOrDefer(this.sender.dueRetransmissions(now)));
+
+    // RESUME declaration retransmission (SPEC §5 recovery discipline): a
+    // declaration that stays unanswered past the verdict timeout is
+    // retransmitted — the handshake is the sole recovery entry, so its own
+    // reliability is mandatory. Only still-gated copies are re-declared
+    // (adjudicated ones are out of the pending set or out of the gate);
+    // each retransmission re-anchors its verdict clock.
+    const redeclare = this.sender.timedOutDeclarations(now, this.resumeVerdictTimeoutMs);
+    if (redeclare.length > 0) {
+      console.debug(
+        "[xacpp:reliability] retransmitting RESUME declaration for %d unanswered transaction(s)",
+        redeclare.length,
+      );
+      controlFrames.push(
+        encodeFrame(makeFrame(CONTROL_PAYLOAD_FRAME_TYPES.resumeRequest, encodeResumeRequest(redeclare))),
+      );
+    }
 
     if (this.lastHeartbeatAt === null || now - this.lastHeartbeatAt >= this.heartbeatIntervalMs) {
       this.lastHeartbeatAt = now;
@@ -1080,6 +1138,26 @@ export class TransferSession {
     if (held !== undefined) {
       this.heldWrites.delete(transactionId);
       for (const w of held) w.reject(err);
+    }
+  }
+
+  /**
+   * Resolve every pending write of a transaction (holder-side adjudication
+   * closed it CONFIRMED: the bytes are acknowledged as delivered on the
+   * wire — the writes are complete).
+   */
+  private resolvePendingWritesForClosure(transactionId: string): void {
+    for (let i = this.deferredWrites.length - 1; i >= 0; i--) {
+      const write = this.deferredWrites.at(i);
+      if (write === undefined) continue;
+      if (write.transactionId !== transactionId) continue;
+      this.deferredWrites.splice(i, 1);
+      write.resolve();
+    }
+    const held = this.heldWrites.get(transactionId);
+    if (held !== undefined) {
+      this.heldWrites.delete(transactionId);
+      for (const w of held) w.resolve();
     }
   }
 

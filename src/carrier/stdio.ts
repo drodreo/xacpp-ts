@@ -136,6 +136,10 @@ export class StdioTransport implements XacppTransport, TransferWiring {
   async disconnect(): Promise<void> {
     this._exhausted = true;
 
+    // SPEC §5 disconnect discipline: the transfer mount detaches from the
+    // dead transport immediately (same as the socket transport).
+    this.transferHandlers = null;
+
     // Shut the egress down (queued frames flush FIFO before the writer closes).
     this.egress?.close();
     this.egress = null;
@@ -303,6 +307,9 @@ export class StdioTransport implements XacppTransport, TransferWiring {
     if (this.readerGone) return;
     this.readerGone = true;
     this._connected = false;
+    // SPEC §5 disconnect discipline: the reader observed the connection's
+    // death — detach the transfer hooks now (same as the socket transport).
+    this.transferHandlers = null;
     this.rejectAllPending();
     this.egress?.close();
     this.egress = null;

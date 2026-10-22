@@ -354,9 +354,11 @@ describe.skipIf(!BIN_AVAILABLE)("xacpp interop — xacpp-ts client ↔ xacpp-rs 
   // d. reconnect after a fully delivered but UNCONFIRMED transaction: the
   // receiver consumed the slot (no tombstones — it cannot distinguish
   // "completed" from "never seen"), so the declaration adjudicates Unknown
-  // and the holder fails the transfer as a whole (completion remains
-  // final-ACK-only: unconfirmed, never a false confirmation).
-  it("d_reconnect_with_lost_final_ack_fails_unconfirmed_no_tombstone", async () => {
+  // and the holder closes by ITS OWN adjudication (SPEC §5): every frame
+  // was already sent ⇒ CONFIRMED. The zero-progress resume deadlock
+  // (Resumed ⇒ swallowing slot) is retired; the transfer closes in
+  // bounded time with the confirmation terminal.
+  it("d_reconnect_with_lost_final_ack_confirms_by_holder_side_adjudication", async () => {
     const senderSession = new TransferSession({
       sender: { workingFrameBytes: 256 * 1024, initialTimeoutMs: 300, maxTimeoutMs: 5_000 },
     });
@@ -379,14 +381,15 @@ describe.skipIf(!BIN_AVAILABLE)("xacpp interop — xacpp-ts client ↔ xacpp-rs 
 
     // Same session wired into a fresh transport: the holder declares, the
     // peer no longer holds the slot (delivered = consumed), the verdict is
-    // Unknown, and the copy is released with an unconfirmed completion.
+    // Unknown, and the copy closes CONFIRMED by holder-side adjudication
+    // (fully sent).
     const client2 = SocketTransport.connectTo(peer.port, "127.0.0.1");
     client2.onRequest(ackHandler);
     await client2.connect();
     senderSession.wire(client2);
 
     await waitFor(() => completions.length === 1, "completion after reconnect", 30_000);
-    expect(completions[0]).toEqual({ transactionId: txid, confirmed: false });
+    expect(completions[0]).toEqual({ transactionId: txid, confirmed: true });
     expect(senderSession.copyCount).toBe(0);
 
     await client2.disconnect();

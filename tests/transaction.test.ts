@@ -224,7 +224,7 @@ describe("recovery discipline (holder side)", () => {
     sender.onAck(ackEntry(transactionId, 0, 1), 5); // frame 0 confirmed
     sender.declarePending(10);
     const outcome = sender.applyResumeVerdict({ transactionId, status: RESUME_STATUS.Resumed }, 20);
-    expect(outcome).toEqual({ known: true, failed: false, retransmit: [frames[1], frames[2]] });
+    expect(outcome).toEqual({ known: true, confirmed: false, failed: false, retransmit: [frames[1], frames[2]] });
     expect(sender.isAwaitingResume(transactionId)).toBe(false);
     // The retransmission clock is rearmed (fresh window from the verdict).
     expect(sender.dueRetransmissions(20 + 99)).toEqual([]);
@@ -233,12 +233,14 @@ describe("recovery discipline (holder side)", () => {
     expect(sender.onAck(ackEntry(transactionId, 2, 3), 600).released).toBe(true);
   });
 
-  it("Unknown fails the transfer as a whole: the copy is released (no terminal trace)", () => {
+  it("Unknown fails an UNFINISHED transfer (frames still owed): the copy is released", () => {
     const sender = makeSender();
-    const { transactionId } = sender.open(filler(16), { now: 0 });
+    const { transactionId } = sender.openStream({ now: 0, totalLen: 16 });
+    sender.appendChunk(transactionId, filler(8), { now: 1 }); // half written — frames still owed
     sender.declarePending(10);
     expect(sender.applyResumeVerdict({ transactionId, status: RESUME_STATUS.Unknown }, 20)).toEqual({
       known: true,
+      confirmed: false,
       failed: true,
       retransmit: [],
     });
@@ -246,18 +248,35 @@ describe("recovery discipline (holder side)", () => {
     // A replayed verdict for the released id fires nothing twice.
     expect(sender.applyResumeVerdict({ transactionId, status: RESUME_STATUS.Unknown }, 30)).toEqual({
       known: false,
+      confirmed: false,
       failed: false,
       retransmit: [],
     });
   });
 
-  it("Rejected fails exactly like Unknown (wire-compat value)", () => {
+  it("Unknown CONFIRMS a fully-sent transfer (holder-side adjudication, SPEC §5)", () => {
+    const sender = makeSender();
+    // open() frames the whole payload: tail frame plus the completion
+    // announcement went out — the holder's own knowledge says fully sent.
+    const { transactionId } = sender.open(filler(16), { now: 0 });
+    sender.declarePending(10);
+    expect(sender.applyResumeVerdict({ transactionId, status: RESUME_STATUS.Unknown }, 20)).toEqual({
+      known: true,
+      confirmed: true,
+      failed: false,
+      retransmit: [],
+    });
+    expect(sender.copyCount).toBe(0);
+  });
+
+  it("Rejected adjudicates exactly like Unknown (wire-compat value): fully sent ⇒ confirmed", () => {
     const sender = makeSender();
     const { transactionId } = sender.open(filler(16), { now: 0 });
     sender.declarePending(10);
     expect(sender.applyResumeVerdict({ transactionId, status: RESUME_STATUS.Rejected }, 20)).toEqual({
       known: true,
-      failed: true,
+      confirmed: true,
+      failed: false,
       retransmit: [],
     });
     expect(sender.copyCount).toBe(0);
@@ -285,7 +304,7 @@ describe("recovery discipline (holder side)", () => {
     sender.appendChunk(transactionId, filler(8), { now: 2 }); // held while paused
     sender.declarePending(10);
     const outcome = sender.applyResumeVerdict({ transactionId, status: RESUME_STATUS.Resumed }, 20);
-    expect(outcome).toEqual({ known: true, failed: false, retransmit: [] });
+    expect(outcome).toEqual({ known: true, confirmed: false, failed: false, retransmit: [] });
     expect(sender.isAwaitingResume(transactionId)).toBe(false);
     // Still paused: the retransmission clock stays suspended.
     expect(sender.dueRetransmissions(1_000_000)).toEqual([]);

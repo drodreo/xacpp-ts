@@ -20,8 +20,10 @@
  *   pending sends (`declarePending`, gating them against retransmission);
  *   the receiver's per-transaction verdict (`applyResumeVerdict`) either
  *   lifts the gate and retransmits the unconfirmed frames (`resumed`) or
- *   fails the transfer as a whole (`unknown`/`rejected` — the copy is
- *   released, leaving no terminal trace).
+ *   closes the transfer by HOLDER-SIDE ADJUDICATION (`unknown`/`rejected`
+ *   — no tombstone exists on the receiver): every frame already sent ⇒
+ *   confirmed; frames still owed ⇒ failed. The copy is released either
+ *   way (no terminal trace).
  *
  * Time-injected: no internal timers. Every timing-bearing method takes
  * `now` (ms, caller clock); the integration layer drives the
@@ -77,9 +79,16 @@ export interface AckOutcome {
 export interface ResumeVerdictOutcome {
   /** False when the transaction is not in pending (replay-safe no-op). */
   known: boolean;
-  /** True when the verdict failed the transfer (Unknown/Rejected): copy released. */
+  /**
+   * True when the verdict closed the transfer CONFIRMED by holder-side
+   * adjudication (Unknown/Rejected + every frame already sent — tail frame
+   * plus the completion announcement went out): copy released, waiters
+   * fire with a confirmation terminal.
+   */
+  confirmed: boolean;
+  /** True when the verdict closed the transfer FAILED (Unknown/Rejected + frames still owed): copy released. */
   failed: boolean;
-  /** Unconfirmed frames to retransmit (Resumed only; empty when paused or failed). */
+  /** Unconfirmed frames to retransmit (Resumed only; empty when paused or closed). */
   retransmit: Frame[];
 }
 
@@ -113,6 +122,13 @@ interface Copy {
    * and sink writes hold their frames until the receiver's verdict arrives.
    */
   awaitingResume: boolean;
+  /**
+   * Caller-clock ms the RESUME declaration was last sent at (`null` while
+   * not gated). A declaration unanswered past the verdict timeout is
+   * retransmitted (SPEC §5: the handshake is the sole recovery entry, so
+   * its own reliability is mandatory).
+   */
+  declaredAt: number | null;
 }
 
 function requireNow(now: number): void {
@@ -245,6 +261,7 @@ export class TransactionSender {
       heldFrames: [],
       writtenBytes: owned.length,
       awaitingResume: false,
+      declaredAt: null,
     });
     return { transactionId, frames };
   }
@@ -280,6 +297,7 @@ export class TransactionSender {
       heldFrames: [],
       writtenBytes: 0,
       awaitingResume: false,
+      declaredAt: null,
     });
     return { transactionId };
   }
@@ -478,13 +496,40 @@ export class TransactionSender {
    * entries. The progress fields carry the holder's written progress
    * (informational; the receiver adjudicates on the txid alone — its own
    * ACK stream is the watermark, which is why the resume instruction
-   * carries no offset). An empty pending set declares nothing.
+   * carries no offset). `now` anchors the verdict timeout (an unanswered
+   * declaration is retransmitted — SPEC §5). An empty pending set
+   * declares nothing.
    */
   declarePending(now: number): ResumeRequestEntry[] {
     requireNow(now);
     const entries: ResumeRequestEntry[] = [];
     for (const copy of this.copies.values()) {
       copy.awaitingResume = true;
+      copy.declaredAt = now;
+      entries.push({
+        transactionId: copy.transactionId,
+        highestContiguousSeq: Math.max(copy.frames.length - 1, 0),
+        receivedFrames: copy.frames.length,
+      });
+    }
+    return entries;
+  }
+
+  /**
+   * Verdict-timeout sweep (SPEC §5): re-arm the gate and declare ONLY the
+   * copies whose declaration has stayed unanswered past `timeoutMs` — the
+   * handshake is the sole recovery entry, so its own reliability is
+   * mandatory. Each returned entry's declaration clock is re-anchored at
+   * `now`. Copies already adjudicated (`Resumed` lifted the gate,
+   * `Unknown`/`Rejected` released the copy) are never re-declared.
+   */
+  timedOutDeclarations(now: number, timeoutMs: number): ResumeRequestEntry[] {
+    requireNow(now);
+    const entries: ResumeRequestEntry[] = [];
+    for (const copy of this.copies.values()) {
+      if (!copy.awaitingResume || copy.declaredAt === null) continue;
+      if (now - copy.declaredAt < timeoutMs) continue;
+      copy.declaredAt = now;
       entries.push({
         transactionId: copy.transactionId,
         highestContiguousSeq: Math.max(copy.frames.length - 1, 0),
@@ -509,9 +554,13 @@ export class TransactionSender {
    *   intent dominates; unpausing rearms the clock and the timeout sweep
    *   covers the gap);
    * - `Unknown` / `Rejected` — the receiver does not recognize the
-   *   transaction: the transfer fails as a whole. The copy is released
-   *   (no terminal trace — completion remains final-ACK-only; the caller
-   *   releases waiters with a failure terminal, never a confirmation).
+   *   transaction (no tombstone: consumed-and-delivered and never-seen
+   *   are indistinguishable to it). The transfer closes by HOLDER-SIDE
+   *   ADJUDICATION from the holder's own knowledge (SPEC §5): every frame
+   *   already sent (tail frame plus the completion announcement —
+   *   `writtenBytes` covers `totalLen`) ⇒ CONFIRMED; frames still owed ⇒
+   *   FAILED. The copy is released either way; the caller releases
+   *   waiters with the matching terminal.
    *
    * Unknown transaction ids are a no-op (a replayed verdict for an
    * already-released copy fires nothing twice).
@@ -519,12 +568,13 @@ export class TransactionSender {
   applyResumeVerdict(entry: ResumeResponseEntry, now: number): ResumeVerdictOutcome {
     requireNow(now);
     const copy = this.copies.get(entry.transactionId);
-    if (copy === undefined) return { known: false, failed: false, retransmit: [] };
+    if (copy === undefined) return { known: false, confirmed: false, failed: false, retransmit: [] };
     if (entry.status === RESUME_STATUS.Resumed) {
       copy.awaitingResume = false;
+      copy.declaredAt = null;
       copy.attempts = 0;
       copy.nextRetryAt = now + this.initialTimeoutMs;
-      if (copy.paused) return { known: true, failed: false, retransmit: [] };
+      if (copy.paused) return { known: true, confirmed: false, failed: false, retransmit: [] };
       // Entries at or below the confirmed frontier are nulled out
       // (fragment-level release) and are never re-sent.
       const retransmit: Frame[] = [];
@@ -538,10 +588,12 @@ export class TransactionSender {
         retransmit.push(frame);
       }
       copy.heldFrames = []; // every held frame is an unconfirmed copy frame — covered above
-      return { known: true, failed: false, retransmit };
+      return { known: true, confirmed: false, failed: false, retransmit };
     }
-    // Unknown / Rejected: fail the transfer as a whole.
+    // Unknown / Rejected: holder-side adjudication (SPEC §5) — closure
+    // comes from the holder's own knowledge, not the receiver's.
+    const fullySent = copy.writtenBytes === copy.totalLen;
     this.copies.delete(entry.transactionId);
-    return { known: true, failed: true, retransmit: [] };
+    return { known: true, confirmed: fullySent, failed: !fullySent, retransmit: [] };
   }
 }

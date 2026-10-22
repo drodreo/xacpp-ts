@@ -907,7 +907,7 @@ describe("C — error-semantics ledger", () => {
       makeFrame(FrameType.DATA_BINARY, body.subarray(1024), { transactionId: txid, totalLen: 2048, seq: 1 }),
     );
 
-    // Retransmission copies of seq 0 never deliver early and are absorbed.
+    // Retransmission copies of seq 0 never deliver early (duplicate, idempotent).
     rig.write(seq0);
     rig.write(seq0);
     rig.write(seq0);

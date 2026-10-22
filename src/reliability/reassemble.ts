@@ -2,7 +2,15 @@
  * Transaction reassembler (docs/SPEC.md §3 "Reassembly criteria" and
  * §5 "Reliability semantics", receiver side).
  *
- * One slot per `transactionId`; frames may arrive in any order.
+ * One slot per `transactionId`; frames may arrive in any order once the
+ * slot exists. A transaction id reaches the receiver only through the
+ * peer's explicit announcement (SPEC §8 causality chain) — carried by
+ * `seq == 0`, the only frame that opens a slot. A data frame for a
+ * slotless id (`seq > 0`) is a late retransmission of a settled
+ * transaction or an unannounced stream: it is **not** reassembled —
+ * reported as `slotlessDropped`, no slot is opened and nothing is
+ * answered; the holder's closure signal is the RESUME verdict, never a
+ * data-frame reply.
  * Reassembly criteria (SPEC §3): frames contiguous from seq 0 AND
  * `sum(frame_len) == total_len`. Duplicates are idempotent; overruns
  * (bytes beyond `total_len`) and `total_len` mismatches are protocol
@@ -38,6 +46,12 @@ export const NACK_MISSING_SEQS_MAX = Math.floor(
 /** Result of feeding one frame into the reassembler. */
 export interface PushOutcome {
   transactionId: string;
+  /**
+   * True when this frame carried a slotless id with `seq > 0` (SPEC §3/§5):
+   * dropped — no slot opened, nothing reassembled, nothing answered. All
+   * other flags are meaningless for it.
+   */
+  slotlessDropped: boolean;
   /** True when this seq was already held — the frame is ignored (idempotent). */
   duplicate: boolean;
   /** True when this frame completed the transaction (exactly once per transaction). */
@@ -136,6 +150,18 @@ export class TransactionReassembler {
       throw new RangeError(`now must be a non-negative safe integer, got: ${now}`);
     }
     let slot = this.slots.get(frame.transactionId);
+    if (slot === undefined && frame.seq > 0) {
+      // SPEC §3/§5: only `seq == 0` opens a slot (the §8 causality chain
+      // announces the transaction through it). A tail frame for a slotless
+      // id is dropped — no slot, no reassembly, nothing answered.
+      return {
+        transactionId: frame.transactionId,
+        slotlessDropped: true,
+        duplicate: false,
+        completed: false,
+        frontierSeq: -1,
+      };
+    }
     if (slot === undefined) {
       slot = {
         transactionId: frame.transactionId,
@@ -160,6 +186,7 @@ export class TransactionReassembler {
       }
       return {
         transactionId: frame.transactionId,
+        slotlessDropped: false,
         duplicate: true,
         completed: isComplete(slot),
         frontierSeq: frontier(slot).next - 1,
@@ -177,6 +204,7 @@ export class TransactionReassembler {
 
     return {
       transactionId: frame.transactionId,
+      slotlessDropped: false,
       duplicate: false,
       completed: isComplete(slot),
       frontierSeq: frontier(slot).next - 1,

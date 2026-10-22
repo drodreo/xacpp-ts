@@ -132,6 +132,13 @@ export interface TransferConfig {
   ackBatchFrames?: number;
   /** Incremental ACK time threshold; default {@link DEFAULT_ACK_BATCH_INTERVAL_MS}. */
   ackBatchIntervalMs?: number;
+  /**
+   * RESUME declaration verdict timeout (SPEC §5 recovery discipline): a
+   * declaration that stays unanswered past this timeout is retransmitted
+   * — the handshake is the sole recovery entry, so its own reliability is
+   * mandatory. Default 2000 ms.
+   */
+  resumeVerdictTimeoutMs?: number;
 }
 
 /** Frames the session asks the binding to write during one clock tick / dispatch. */

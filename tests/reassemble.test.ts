@@ -96,14 +96,26 @@ describe("assembly and delivery", () => {
     for (const perm of permutations([0, 1, 2, 3])) {
       const frames = chunk(payload, 4);
       const reassembler = new TransactionReassembler();
+      const txid = frames[0].transactionId;
+      // SPEC §3/§5: only `seq == 0` opens a slot. Tail frames arriving
+      // before frame 0 are dropped slotless (the slotless rule: only `seq == 0` opens).
       let completedOn: number | null = null;
-      perm.forEach((seq, i) => {
+      for (const seq of perm) {
+        if (seq === 0) break;
+        const outcome = reassembler.push(frames[seq], 0);
+        expect(outcome.slotlessDropped).toBe(true);
+        expect(reassembler.has(txid)).toBe(false);
+      }
+      // Frame 0 opens the slot; the dropped tails are late retransmissions
+      // now — replayed in order, they assemble to completion.
+      const ordered = [0, ...perm.filter((s) => s !== 0)];
+      ordered.forEach((seq, i) => {
         const outcome = reassembler.push(frames[seq], 0);
         if (outcome.completed) completedOn = i;
       });
       // Contiguity + total bytes requires every frame: completion lands on the final push.
       expect(completedOn).toBe(3);
-      expect(reassembler.take(frames[0].transactionId)).toEqual(payload);
+      expect(reassembler.take(txid)).toEqual(payload);
     }
   });
 
@@ -180,7 +192,7 @@ describe("gap detection and NACK export", () => {
     expect(NACK_MISSING_SEQS_MAX).toBe(4091); // (16384 - 1 - 16 - 2) / 4
   });
 
-  it("omits slots without a contiguous prefix from ACK export; their gaps are real", () => {
+  it("omits slotless transactions from ACK export; nothing is reassembled or answered", () => {
     const reassembler = new TransactionReassembler();
     const txid = newTransactionId();
     reassembler.push(
@@ -188,14 +200,19 @@ describe("gap detection and NACK export", () => {
       0,
     );
     const fresh = newTransactionId();
-    // First arrival is seq 1: no contiguous prefix yet, and seq 0 is a real gap.
-    reassembler.push(
+    // Frame 0 never arrived: the slotless tail is dropped (SPEC §3/§5) —
+    // no slot, so no contiguous prefix, no ACK entry, and no NACK either
+    // (nothing was reassembled and nothing is answered; the holder's
+    // closure signal is the RESUME verdict).
+    const outcome = reassembler.push(
       makeFrame(FrameType.DATA_BINARY, new Uint8Array(4), { transactionId: fresh, totalLen: 8, seq: 1 }),
       0,
     );
-    expect(reassembler.nackEntries()).toEqual([{ transactionId: fresh, missingSeqs: [0] }]);
+    expect(outcome.slotlessDropped).toBe(true);
+    expect(reassembler.has(fresh)).toBe(false);
+    expect(reassembler.nackEntries().map((e) => e.transactionId)).toEqual([]);
     expect(reassembler.ackEntries().map((e) => e.transactionId)).toEqual([txid]);
-    // Filling seq 0 promotes the slot into the ACK export.
+    // Frame 0 arrives: the slot opens and promotes into the ACK export.
     reassembler.push(
       makeFrame(FrameType.DATA_BINARY, new Uint8Array(4), { transactionId: fresh, totalLen: 8, seq: 0 }),
       0,
@@ -209,12 +226,15 @@ describe("concurrent transactions", () => {
     const payloads = [filler(50, 1), filler(120, 2), filler(10, 3)];
     const reassembler = new TransactionReassembler();
     const chunks = payloads.map((p) => chunk(p, 20));
-    // Interleave round-robin, reversed frame order within each round.
+    // Every transaction's slot opens with its own seq-0 frame first
+    // (SPEC §3/§5: only `seq == 0` opens); the tails then interleave,
+    // reversed frame order within each round.
+    for (const frames of chunks) reassembler.push(frames[0], 0);
     const maxLen = Math.max(...chunks.map((c) => c.length));
-    for (let i = 0; i < maxLen; i++) {
+    for (let i = 1; i < maxLen; i++) {
       for (const frames of chunks) {
-        const idx = frames.length - 1 - i;
-        if (idx >= 0) reassembler.push(frames[idx], 0);
+        const idx = frames.length - i;
+        if (idx >= 1) reassembler.push(frames[idx], 0);
       }
     }
     chunks.forEach((frames, i) => {

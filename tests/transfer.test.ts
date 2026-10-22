@@ -256,8 +256,8 @@ describe("TransferSession — RESUME across connections", () => {
     expect(response).toEqual([{ transactionId, status: RESUME_STATUS.Resumed }]);
 
     // The verdict lifts the gate and retransmits every unconfirmed frame
-    // (frame 0's ACK never arrived — it retransmits and is absorbed
-    // idempotently by the receiver's incomplete window).
+    // (frame 0's ACK never arrived — the retransmission lands as a
+    // duplicate, idempotent in the receiver's incomplete window).
     const outcome = sender.onControlFrame(responseFrame, 4);
     expect(outcome.controlFrames).toEqual([]);
     expect(outcome.dataFrames).toEqual(frames);
@@ -271,7 +271,7 @@ describe("TransferSession — RESUME across connections", () => {
     expect(completions).toEqual([{ transactionId, confirmed: true }]);
   });
 
-  it("a receiver `unknown` verdict fails the transfer: copy released, completion unconfirmed", () => {
+  it("a receiver `unknown` verdict closes a fully-sent transfer CONFIRMED (holder-side adjudication)", () => {
     const completions: BinarySendResult[] = [];
     const sender = new TransferSession({ sender: { ...QUIET_SENDER, workingFrameBytes: 100 } });
     const { transactionId, frames } = sender.openSend(filler(300), 0, (r) => completions.push(r));
@@ -283,8 +283,12 @@ describe("TransferSession — RESUME across connections", () => {
     );
     const outcome = sender.onControlFrame(unknown, 1);
 
+    // Holder-side adjudication (SPEC §5): the receiver does not recognize
+    // the transaction, and the holder's own knowledge says every frame was
+    // already sent ⇒ confirmed — the copy is released and the completion
+    // fires with the confirmation terminal.
     expect(sender.copyCount).toBe(0);
-    expect(completions).toEqual([{ transactionId, confirmed: false }]);
+    expect(completions).toEqual([{ transactionId, confirmed: true }]);
     expect(outcome.controlFrames).toEqual([]);
   });
 
@@ -396,6 +400,25 @@ describe("TransferSession — recovery adjudication (receiver side)", () => {
     expect(receiver.pendingCount).toBe(1); // complete slots are NOT cross-checked out
   });
 
+  it("a completed-but-undelivered slot answers Unknown for its own declaration (resumed would deadlock the holder on the swallowing slot)", () => {
+    const receiver = new TransferSession(); // no handler: delivery is pending
+    const sender = new TransferSession({ sender: { ...QUIET_SENDER, workingFrameBytes: 100 } });
+    const { frames, transactionId } = sender.openSend(filler(300), 0);
+    feed(receiver, frames, 1); // complete, but undelivered (no onBinary)
+
+    const outcome = receiver.onControlFrame(
+      makeFrame(
+        FrameType.RESUME,
+        encodeResumeRequest([{ transactionId, highestContiguousSeq: 2, receivedFrames: 3 }]),
+      ),
+      2,
+    );
+    expect(decodeResumeResponse(decodeControl(outcome.controlFrames[0]).payload)).toEqual([
+      { transactionId, status: RESUME_STATUS.Unknown },
+    ]);
+    expect(receiver.pendingCount).toBe(1); // the slot stays retained for local consumption
+  });
+
   it("both directions reconcile independently over crossed declarations", () => {
     const a = new TransferSession({ sender: { ...QUIET_SENDER, workingFrameBytes: 100 } });
     const b = new TransferSession({ sender: { ...QUIET_SENDER, workingFrameBytes: 100 } });
@@ -443,7 +466,7 @@ describe("TransferSession — recovery adjudication (receiver side)", () => {
   });
 });
 
-  it("a peer RESUME rejection (RESUME_RESPONSE frame) releases the copy and reports unconfirmed", () => {
+  it("a peer RESUME rejection (RESUME_RESPONSE frame) adjudicates like unknown: fully sent ⇒ confirmed", () => {
     const completions: BinarySendResult[] = [];
     const sender = new TransferSession({ sender: { ...QUIET_SENDER, workingFrameBytes: 100 } });
     const { transactionId, frames } = sender.openSend(filler(300), 0, (r) => completions.push(r));
@@ -455,8 +478,11 @@ describe("TransferSession — recovery adjudication (receiver side)", () => {
     );
     const outcome = sender.onControlFrame(rejected, 1);
 
+    // Wire-compat value, same adjudication as unknown (SPEC §5): fully
+    // sent ⇒ confirmed — the copy is released, the completion fires with
+    // the confirmation terminal.
     expect(sender.copyCount).toBe(0);
-    expect(completions).toEqual([{ transactionId, confirmed: false }]);
+    expect(completions).toEqual([{ transactionId, confirmed: true }]);
     expect(outcome.controlFrames).toEqual([]);
   });
 
