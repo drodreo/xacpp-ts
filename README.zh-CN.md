@@ -23,6 +23,8 @@ xacpp 定义了 Agent 与对端之间的通信协议。它提供了分层架构�
 └──────────────────────────────────────────────────────────────┘
 ```
 
+会话的生存期长于单条连接：断连时会话立即从失效 transport 摘除传输挂载——死链上仍在途的帧被丢弃，绝不进入会话状态机——传输状态保留在会话中；重连后会话挂载到新 transport，中断的传输经 RESUME 握手恢复（裁决门控重传，见 SPEC §5）。
+
 ## 安装
 
 ```bash
@@ -110,7 +112,7 @@ const server = new SocketTransport(acceptedSocket);
 
 ## 线路协议
 
-JSONL（每行一个 JSON 对象），信封结构：
+组帧采用 XACPP 二进制帧协议（docs/SPEC.md §3/§4）：每个信封作为 `DATA_JSON` 帧的载荷传输。信封结构：
 
 ```json
 {"type":"request","id":"r1","payload":{"kind":"command","payload":{"establish":{"credentials":null}}}}
@@ -128,6 +130,19 @@ Generic 命令携带可选的 `activity` 引用（`activity: {"id": string}`）�
 ## 命令声明约定
 
 命令声明 schema 可携带 `dispatcher` 字段，枚举值 `"bridge" | "tool"`，缺省视为 `"bridge"`：`bridge` 表示直连事件桥系统路径，`tool` 表示注入接收方模型工具面（同名 replace，对端声明优先）。声明 schema 为透传 JSON——协议库不强制类型。
+
+## 性能
+
+基线由 `pnpm bench:protocol` 与 `pnpm bench:egress` 测得（TCP 回环；需 Node >= 22.2）。以下数字是后续优化工作的参照基准。
+
+| 指标 | 基线 2026-10-14 | 复测 2026-10-23 |
+|---|---|---|
+| 编解码开销 vs JSONL | −38% ~ −83%（CRC + 40 B 帧头） | 该组 PASS（分块路径） |
+| 请求-响应 RTT | p50 0.071 ms @ ~11.9k req/s | p50 0.070 ms |
+| 64 MiB `sendBinary`（1 MiB 工作帧） | 单流 448 MiB/s | 461 MiB/s |
+| 4 × 16 MiB 并发 | 399 MiB/s | 390–439 MiB/s |
+| 批量传输下心跳 p50 | ≈98 ms | 178–196 ms |
+| 裸 peer 有序出站 | 入队 ~196k events/s，排空 ~38k | 入队 184k，排空 35k |
 
 ## 许可证
 

@@ -25,9 +25,12 @@ xacpp defines the communication protocol between an agent and its peers. It prov
 └──────────────────────────────────────────────────────────────┘
 ```
 
-A session outlives individual connections: on disconnect the transfer state
-stays in the session; on reconnect the session wires itself onto the new
-transport and interrupted transfers resume from the breakpoint.
+A session outlives individual connections: on disconnect the session detaches
+its transfer mount from the dead transport immediately — frames still flushing
+through the dead connection are dropped, never absorbed into session state —
+and the transfer state stays in the session. On reconnect the session wires
+itself onto the new transport and interrupted transfers resume through the
+RESUME handshake (verdict-gated retransmission, SPEC §5).
 
 ## Install
 
@@ -150,11 +153,14 @@ Command declaration schemas may carry a `dispatcher` field with enum value `"bri
 
 Baselines measured by `pnpm bench:protocol` and `pnpm bench:egress` (TCP loopback; requires Node >= 22.2). These numbers are the reference for future optimization work.
 
-- Codec (pure encode/decode): frame overhead −38% to −83% vs the JSONL baseline (CRC + 40 B header) — the full-chain bottleneck is not the codec
-- Request-response RTT: p50 0.071 ms at ~11.9k req/s
-- 64 MiB `sendBinary` (1 MiB working frames): 448 MiB/s single stream; 4 × 16 MiB concurrent: 399 MiB/s
-- Control-frame insertion: heartbeat p50 under bulk ≈ 98 ms — one in-flight write cycle
-- Ordered egress over a raw peer: ~196k events/s enqueue, ~38k events/s drain
+| Metric | Baseline 2026-10-14 | Re-verified 2026-10-23 |
+|---|---|---|
+| Codec overhead vs JSONL | −38% to −83% (CRC + 40 B header) | group PASS (chunked path) |
+| Request-response RTT | p50 0.071 ms @ ~11.9k req/s | p50 0.070 ms |
+| 64 MiB `sendBinary` (1 MiB frames) | 448 MiB/s single stream | 461 MiB/s |
+| 4 × 16 MiB concurrent | 399 MiB/s | 390–439 MiB/s |
+| Heartbeat p50 under bulk | ≈98 ms | 178–196 ms |
+| Ordered egress (raw peer) | ~196k events/s enqueue, ~38k drain | 184k enqueue, 35k drain |
 
 ## License
 
