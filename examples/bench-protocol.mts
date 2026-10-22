@@ -55,13 +55,13 @@ import {
   acknowledge,
   newActivityEvent,
   newEvent,
-} from "../dist/esm/index.mjs";
+} from "../dist/esm/index.js";
 import type {
   Frame,
   XacppEnvelope,
   XacppTransport,
   TransferConfig,
-} from "../dist/esm/index.mjs";
+} from "../dist/esm/index.js";
 
 // ---- scale / config ----
 

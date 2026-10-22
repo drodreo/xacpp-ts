@@ -28,7 +28,7 @@ import {
   SocketTransport,
   newActivityEvent,
   newEvent,
-} from "../dist/esm/index.mjs";
+} from "../dist/esm/index.js";
 
 /** Typical stream length captured in high-latency scenarios (batch-1 baseline). */
 const DEFAULT_N = 40_000;

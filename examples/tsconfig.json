@@ -1,5 +1,5 @@
 {
-  "//": "Editor/CI config for the bench examples. They import the BUILT artifact (../dist/esm/index.mjs) at runtime AND for types — TS resolves a .mjs import to its sibling .d.mts declaration (emitted via rslib dts.autoExtension), so a build is required before type-checking here. The root tsconfig.json only covers src/ (build-facing), so editors otherwise fall back to an inferred project here. Note: tsconfig paths mappings do not apply to relative imports, which is why the import is NOT remapped to src/.",
+  "//": "Editor/CI config for the bench examples. They import the BUILT artifact (../dist/esm/index.js) at runtime AND for types — TS resolves a .js import to its sibling .d.ts declaration (bundled via rslib dts), so a build is required before type-checking here. The root tsconfig.json only covers src/ (build-facing), so editors otherwise fall back to an inferred project here. Note: tsconfig paths mappings do not apply to relative imports, which is why the import is NOT remapped to src/.",
   "extends": "../tsconfig.check.json",
   "include": ["./**/*.mts"]
 }

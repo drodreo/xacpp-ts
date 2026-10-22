@@ -4,11 +4,12 @@ export default defineConfig({
   lib: [
     {
       format: "esm",
-      // Emit a single bundled .d.mts alongside .mjs — TS resolves a .mjs
-      // import to its same-named .d.mts declaration file (a plain .d.ts is
-      // not matched), and bundling avoids extensionless re-export probing
-      // that moduleResolution:bundler cannot satisfy for .d.mts trees.
-      dts: { bundle: true, autoExtension: true },
+      // The root package.json declares "type": "module", so rslib emits the
+      // ESM bundle as .js (the scope default) with a single bundled .d.ts
+      // alongside it; the CommonJS sibling below gets an explicit .cjs
+      // extension — the extension itself carries the module type, no
+      // per-directory package.json needed.
+      dts: { bundle: true },
       output: {
         distPath: {
           root: "./dist/esm",
