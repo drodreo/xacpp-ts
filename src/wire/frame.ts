@@ -17,9 +17,9 @@ import { crc32 as zlibCrc32 } from "node:zlib";
 /** Wire protocol major version carried in every frame header (SPEC §3/§9). */
 export const PROTOCOL_VERSION_MAJOR = 1;
 /** Wire protocol minor version carried in every frame header (SPEC §3/§9).
- * Advances with the library minor version; fetch (1.1) is an envelope-level
- * extension — frame format unchanged. */
-export const PROTOCOL_VERSION_MINOR = 1;
+ * Advances with the library minor version; fetch (1.1) and activity event
+ * payload extensions (1.2) are envelope-level — frame format unchanged. */
+export const PROTOCOL_VERSION_MINOR = 2;
 
 /** ASCII "XACP" frame magic (SPEC §3). */
 const MAGIC_BYTES = new Uint8Array([0x58, 0x41, 0x43, 0x50]);

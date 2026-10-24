@@ -40,7 +40,14 @@ import type {
   QuestionPayload,
   SensitiveInfoOperationPayload,
 } from "../src/wire/events/interaction";
-import type { ToolResultEvent } from "../src/wire/events/payload";
+import type {
+  CompleteEvent,
+  ModelTier,
+  PairCompleteEvent,
+  ToolResultEvent,
+  ToolResultStatus,
+} from "../src/wire/events/payload";
+import type { TokenUsage } from "../src/wire/events/upload";
 
 // ---- XacppEvent round-trip ----
 
@@ -820,27 +827,185 @@ describe("Lifecycle command payload serialization", () => {
   });
 });
 
-// ---- Tool result event auto flag ----
+// ---- Tool result event (1.2 strict contract) ----
 
-describe("ToolResultEvent auto flag serialization", () => {
-  it("auto flag roundtrip", () => {
-    const event: ToolResultEvent = {
+describe("ToolResultEvent strict contract", () => {
+  const baseEvent: ToolResultEvent = {
+    requestId: "req-1",
+    toolName: "bash",
+    index: 0,
+    parts: [{ type: "text", text: "done", partType: "default" }],
+    auto: false,
+    isError: false,
+  };
+
+  it("canonical JSON shape: required false/[] explicitly serialized, never omitted", () => {
+    const event: ToolResultEvent = { ...baseEvent, parts: [] };
+    const json = JSON.stringify(event);
+    expect(json).toBe(
+      '{"requestId":"req-1","toolName":"bash","index":0,"parts":[],"auto":false,"isError":false}',
+    );
+  });
+
+  it("optional status/isBackground absent -> undefined and omitted from JSON", () => {
+    const json = JSON.stringify(baseEvent);
+    expect(json).not.toContain('"status"');
+    expect(json).not.toContain('"isBackground"');
+    const de = JSON.parse(json) as ToolResultEvent;
+    expect(de.status).toBeUndefined();
+    expect(de.isBackground).toBeUndefined();
+  });
+
+  it("every status value roundtrips verbatim", () => {
+    const statuses: ToolResultStatus[] = ["completed", "running", "cancelled", "error"];
+    for (const status of statuses) {
+      const event: ToolResultEvent = { ...baseEvent, status };
+      const json = JSON.stringify(event);
+      expect(json).toContain(`"status":"${status}"`);
+      const de = JSON.parse(json) as ToolResultEvent;
+      expect(de.status).toBe(status);
+    }
+  });
+
+  it("required fields cannot be omitted at type level", () => {
+    const missingIsError = {
       requestId: "req-1",
       toolName: "bash",
       index: 0,
-      parts: [{ type: "text", text: "done", partType: "default" }],
-      auto: true,
+      parts: [],
+      auto: false,
     };
+    // @ts-expect-error isError is required in the 1.2 strict contract
+    const event: ToolResultEvent = missingIsError;
+    expect(event.isError).toBeUndefined();
+  });
+});
 
-    const json = JSON.stringify(event);
-    expect(json).toContain('"auto":true');
-    expect(JSON.parse(json) as ToolResultEvent).toEqual(event);
+// ---- Pair complete event (1.2 strict contract) ----
+
+describe("PairCompleteEvent strict contract", () => {
+  const baseUsage: TokenUsage = {
+    id: "u-1",
+    message: "m-1",
+    promptTokens: 10,
+    completionTokens: 20,
+    totalTokens: 30,
+  };
+
+  const baseEvent: PairCompleteEvent = {
+    pair: "p-1",
+    contextWindow: 200000,
+    tokenUsage: baseUsage,
+  };
+
+  it("canonical JSON shape with required fields only", () => {
+    const json = JSON.stringify(baseEvent);
+    expect(json).toBe(
+      '{"pair":"p-1","contextWindow":200000,"tokenUsage":{"id":"u-1","message":"m-1","promptTokens":10,"completionTokens":20,"totalTokens":30}}',
+    );
   });
 
-  it("legacy JSON without auto flag parses with undefined auto", () => {
-    const de = JSON.parse(
-      '{"requestId":"req-1","toolName":"bash","index":0,"parts":[{"type":"text","text":"done"}]}',
-    ) as ToolResultEvent;
-    expect(de.auto).toBeUndefined();
+  it("optional tier/model absent -> undefined and omitted from JSON", () => {
+    const json = JSON.stringify(baseEvent);
+    expect(json).not.toContain('"tier"');
+    expect(json).not.toContain('"model"');
+    const de = JSON.parse(json) as PairCompleteEvent;
+    expect(de.tier).toBeUndefined();
+    expect(de.model).toBeUndefined();
+  });
+
+  it("every tier value roundtrips verbatim", () => {
+    const tiers: ModelTier[] = ["default", "lite", "expert"];
+    for (const tier of tiers) {
+      const event: PairCompleteEvent = { ...baseEvent, tier };
+      const json = JSON.stringify(event);
+      expect(json).toContain(`"tier":"${tier}"`);
+      const de = JSON.parse(json) as PairCompleteEvent;
+      expect(de.tier).toBe(tier);
+    }
+  });
+
+  it("tokenUsage.cacheHitTokens roundtrips and is preserved", () => {
+    const event: PairCompleteEvent = {
+      ...baseEvent,
+      tokenUsage: { ...baseUsage, cacheHitTokens: 8 },
+    };
+    const json = JSON.stringify(event);
+    expect(json).toContain('"cacheHitTokens":8');
+    expect(JSON.parse(json) as PairCompleteEvent).toEqual(event);
+  });
+});
+
+// ---- Complete event (1.2 strict contract) ----
+
+describe("CompleteEvent strict contract", () => {
+  it("canceled=true with abortReason: canonical JSON shape and roundtrip", () => {
+    const event: CompleteEvent = {
+      round: "r-1",
+      assistantReply: [],
+      abortReason: "user abort",
+      canceled: true,
+    };
+    const json = JSON.stringify(event);
+    expect(json).toBe(
+      '{"round":"r-1","assistantReply":[],"abortReason":"user abort","canceled":true}',
+    );
+    expect(JSON.parse(json) as CompleteEvent).toEqual(event);
+  });
+
+  it("normal completion: canceled=false explicit, abortReason absent stays undefined", () => {
+    const event: CompleteEvent = {
+      round: "r-2",
+      assistantReply: [],
+      canceled: false,
+    };
+    const json = JSON.stringify(event);
+    expect(json).toBe('{"round":"r-2","assistantReply":[],"canceled":false}');
+    const de = JSON.parse(json) as CompleteEvent;
+    expect(de.canceled).toBe(false);
+    expect(de.abortReason).toBeUndefined();
+  });
+
+  it("canceled is required at type level", () => {
+    const missingCanceled = {
+      round: "r-3",
+      assistantReply: [],
+    };
+    // @ts-expect-error canceled is required in the 1.2 strict contract
+    const event: CompleteEvent = missingCanceled;
+    expect(event.canceled).toBeUndefined();
+  });
+});
+
+// ---- TokenUsage cacheHitTokens (1.2 strict contract) ----
+
+describe("TokenUsage cacheHitTokens contract", () => {
+  it("cacheHitTokens absent -> undefined and omitted from JSON (provider did not report)", () => {
+    const usage: TokenUsage = {
+      id: "u",
+      message: "m",
+      promptTokens: 100,
+      completionTokens: 10,
+      totalTokens: 110,
+    };
+    const json = JSON.stringify(usage);
+    expect(json).toBe(
+      '{"id":"u","message":"m","promptTokens":100,"completionTokens":10,"totalTokens":110}',
+    );
+    expect((JSON.parse(json) as TokenUsage).cacheHitTokens).toBeUndefined();
+  });
+
+  it("cacheHitTokens=0 is explicit zero and preserved on the wire", () => {
+    const usage: TokenUsage = {
+      id: "u",
+      message: "m",
+      promptTokens: 100,
+      completionTokens: 10,
+      totalTokens: 110,
+      cacheHitTokens: 0,
+    };
+    const json = JSON.stringify(usage);
+    expect(json).toContain('"cacheHitTokens":0');
+    expect(JSON.parse(json) as TokenUsage).toEqual(usage);
   });
 });

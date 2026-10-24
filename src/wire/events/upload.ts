@@ -15,4 +15,6 @@ export interface TokenUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** 缓存命中 token 数（本轮从 provider 端 prompt cache 命中读取的输入 token 数）；缺省 = provider 未报告（undefined），0 = 显式零。 */
+  cacheHitTokens?: number;
 }
