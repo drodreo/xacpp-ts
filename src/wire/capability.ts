@@ -2,6 +2,14 @@
  * XACPP Capabilities — declares what a peer can handle and what it may emit.
  */
 
+/**
+ * The only fetch-extension version currently defined (SPEC §8.7). A side
+ * declares `fetchExt: FETCH_EXT_VERSION` to state "I support fetch at this
+ * version"; the declaration is the declaring side's own decision — the
+ * library never derives it from responder assembly.
+ */
+export const FETCH_EXT_VERSION = 1;
+
 /** Capabilities declared by one side during Negotiate. */
 export interface Capabilities {
   /** JSON Schemas for commands this side can handle (tool-compatible). */
@@ -10,6 +18,13 @@ export interface Capabilities {
   produceEvents?: Record<string, unknown>[];
   /** JSON Schemas for events this side can receive (accept). */
   acceptEvents?: Record<string, unknown>[];
+  /**
+   * Fetch extension version (§8.7) this side supports. Absence means no
+   * fetch support: accessing this side's fetch functionality MUST fail.
+   * Declaration is independent of responder assembly — it is a statement
+   * of protocol-level support, decided by the declaring application.
+   */
+  fetchExt?: number;
 }
 
 /** Negotiate 完成后的生效能力（应用层可见）。 */
@@ -18,6 +33,17 @@ export interface EffectiveCapabilities {
   remoteCommands: Record<string, unknown>[];
   /** 我能发给对端的事件名列表（local.produceEvents ∩ remote.acceptEvents）。 */
   emitEvents: string[];
+  /**
+   * 对端声明的 fetchExt 版本（未声明 = undefined，即对端不支持 fetch）。
+   * 这是 wire 上的事实记录，不是 UNKNOWN 状态、不选择 legacy 回退。
+   */
+  remoteFetchExt?: number;
+  /**
+   * 协商后的 fetch 事实：本端与对端都声明 fetchExt === FETCH_EXT_VERSION
+   * 时为 true，其余情况为 false。unsupported 版本只禁用 fetch，
+   * 不阻断 negotiate、不影响其他命令。
+   */
+  fetchEnabled: boolean;
 }
 
 /** 从 local 和 remote capabilities 计算有效能力。 */
@@ -26,7 +52,12 @@ export function computeEffectiveCapabilities(local: Capabilities, remote: Capabi
   const localProduce = extractNames(local.produceEvents);
   const remoteAccept = extractNames(remote.acceptEvents);
   const emitEvents = localProduce.filter(name => remoteAccept.includes(name));
-  return { remoteCommands, emitEvents };
+  // fetch is enabled only when BOTH sides declared the currently-defined
+  // version. A declared-but-unsupported version (or absence) on either side
+  // disables fetch; it never fails the negotiation itself (SPEC §8.7).
+  const remoteFetchExt = remote.fetchExt;
+  const fetchEnabled = local.fetchExt === FETCH_EXT_VERSION && remoteFetchExt === FETCH_EXT_VERSION;
+  return { remoteCommands, emitEvents, remoteFetchExt, fetchEnabled };
 }
 
 function extractNames(schemas?: Record<string, unknown>[]): string[] {

@@ -99,7 +99,12 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-const EMPTY_CAPS: Capabilities = {};
+// Fetch tests declare fetchExt support on BOTH sides (SPEC §8.7: the
+// declaration is the application's own decision — here, the test harness
+// exercises the fetch family, so both peers declare it; the
+// fetch_unavailable gate (case 11) keeps a bare handler so the wire-level
+// rejection stays the tested path).
+const FETCH_CAPS: Capabilities = { fetchExt: 1 };
 
 const acceptNegotiate: NegotiateHandler = { onNegotiate: async () => {} };
 
@@ -220,7 +225,7 @@ function startServer(opts: ServerOptions): Server {
     };
     const transport = new SocketTransport(socket);
     transports.push(transport);
-    const peer = new XacppPeer(EMPTY_CAPS, transport, acceptNegotiate, establish);
+    const peer = new XacppPeer(FETCH_CAPS, transport, acceptNegotiate, establish);
     void peer
       .connect()
       .then(() => {
@@ -259,7 +264,7 @@ async function connectClient(
   const transport = SocketTransport.connectTo(port, "127.0.0.1");
   const session = new XacppSession(opts?.transferConfig);
   opts?.configure?.(session);
-  const peer = new XacppPeer(EMPTY_CAPS, transport, acceptNegotiate, unusedEstablish, session);
+  const peer = new XacppPeer(FETCH_CAPS, transport, acceptNegotiate, unusedEstablish, session);
   await peer.connect();
   await peer.negotiate();
   await peer.establish(undefined, ackHandler, () => {
@@ -294,7 +299,7 @@ async function reconnectClient(port: number, session: XacppSession): Promise<{ t
     }
   });
   const transport = new SocketTransport(sock);
-  const peer = new XacppPeer(EMPTY_CAPS, transport, acceptNegotiate, unusedEstablish, session);
+  const peer = new XacppPeer(FETCH_CAPS, transport, acceptNegotiate, unusedEstablish, session);
   await peer.connect();
   await peer.negotiate();
   await peer.establish(undefined, ackHandler, () => {

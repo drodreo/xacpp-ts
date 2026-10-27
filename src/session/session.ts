@@ -26,6 +26,8 @@ import type {
   TransferWiring,
 } from "../transfer";
 import type { FetchReady } from "../wire/fetch";
+import { FETCH_UNAVAILABLE } from "../wire/fetch";
+import { isFetchFamily } from "../wire/commands";
 
 /** XACPP logical session.
  *
@@ -43,6 +45,12 @@ export class XacppSession {
   private _credentials: string | null = null;
   /** Event names allowed to emit (negotiated produceEvents ∩ remote acceptEvents); empty = unconstrained. */
   private emitEvents: string[] = [];
+  /**
+   * 协商后的 fetch 事实（SPEC §8.7）：peer 在 negotiate 时回填。false =
+   * 本端不得向该对端发起 fetch-family 命令（出站响亮失败）。未协商 =
+   * false；disconnect 由 peer 清除。
+   */
+  private _fetchEnabled = false;
 
   /**
    * Creates a session with its own transfer state (default configuration,
@@ -166,6 +174,17 @@ export class XacppSession {
 
   /** Send command and wait for response. */
   async requestCommand(command: XacppCommand): Promise<XacppResponse> {
+    // Outbound fetch gate (SPEC §8.7): fetch is a negotiated fact. Before
+    // any fetch-family command leaves this session, the negotiation must
+    // have enabled fetch (both sides declared fetchExt at the supported
+    // version). Not enabled ⇒ fail loudly with the registered wire code —
+    // the request is never sent.
+    if (isFetchFamily(command) && !this._fetchEnabled) {
+      throw XacppError.application(
+        FETCH_UNAVAILABLE,
+        "fetch not enabled with this peer (fetchExt not negotiated)",
+      );
+    }
     return this.requireTransport().send(this.requireSessionId(), { kind: "command", payload: command });
   }
 
@@ -269,6 +288,20 @@ export class XacppSession {
   /** Narrow the negotiated emit capability (peer-driven after negotiate). */
   setEmitEvents(events: string[]): void {
     this.emitEvents = events;
+  }
+
+  /**
+   * Backfill the negotiated fetch fact (SPEC §8.7). Two drivers:
+   * - the peer backfills the initiator-side held session after negotiate
+   *   (and any session it re-binds on establish), clearing on disconnect;
+   * - the responder side constructs its session inside `onEstablish` —
+   *   the application backfills it there from the fact its
+   *   `NegotiateHandler` received (the same consumption pattern as
+   *   `effective.emitEvents`).
+   * A negotiated fact, never a responder-assembly map.
+   */
+  setFetchEnabled(enabled: boolean): void {
+    this._fetchEnabled = enabled;
   }
 
   private requireTransport(): XacppTransport & TransferWiring {

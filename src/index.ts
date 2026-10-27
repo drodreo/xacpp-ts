@@ -16,6 +16,7 @@ export * from "./wire/events";
 export { XacppError, acknowledge, genericResponse, errorResponse } from "./wire/message";
 export type { ActivityInfo, XacppRequest, XacppResponse, XacppEnvelope } from "./wire/message";
 export type { Capabilities, EffectiveCapabilities } from "./wire/capability";
+export { FETCH_EXT_VERSION } from "./wire/capability";
 export type {
   CommandDeclaration,
   CommandDispatcher,

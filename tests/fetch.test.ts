@@ -83,7 +83,10 @@ async function expectXacppError(promise: Promise<unknown>, code: string): Promis
   throw new Error(`expected rejection with code ${code}, but the promise resolved`);
 }
 
-const EMPTY_CAPS: Capabilities = {};
+// Fetch tests declare fetchExt support on BOTH sides (SPEC §8.7: the
+// declaration is the application's own decision — here, the test harness
+// exercises the fetch family, so both peers declare it).
+const FETCH_CAPS: Capabilities = { fetchExt: 1 };
 
 const acceptNegotiate: NegotiateHandler = { onNegotiate: async () => {} };
 
@@ -141,12 +144,22 @@ function startServer(opts: ServerOptions): Server {
   let conns = 0;
   const record = { commands: [] as XacppCommand[] };
   const transports: SocketTransport[] = [];
+  // The negotiated fetch fact (SPEC §8.7), consumed from onNegotiate and
+  // backfilled into the responder-side session at construction — the same
+  // application-side consumption pattern as effective.emitEvents.
+  let negotiatedFetchEnabled = false;
+  const captureNegotiate: NegotiateHandler = {
+    onNegotiate: async (effective) => {
+      negotiatedFetchEnabled = effective.fetchEnabled;
+    },
+  };
 
   const establish: EstablishHandler = {
     onEstablish: async (transport) => {
       if (session === null) {
         session = new XacppSession(opts.transferConfig);
         session.bindIdentity("srv-sid", "srv-creds");
+        session.setFetchEnabled(negotiatedFetchEnabled);
         opts.configure?.(session);
       }
       if (!session.wired) {
@@ -176,7 +189,7 @@ function startServer(opts: ServerOptions): Server {
   listener.on("connection", (socket) => {
     const transport = new SocketTransport(socket);
     transports.push(transport);
-    const peer = new XacppPeer(EMPTY_CAPS, transport, acceptNegotiate, establish);
+    const peer = new XacppPeer(FETCH_CAPS, transport, captureNegotiate, establish);
     void peer
       .connect()
       .then(() => {
@@ -250,7 +263,7 @@ async function connectClient(
   const transport = SocketTransport.connectTo(port, "127.0.0.1");
   const session = new XacppSession(opts?.transferConfig);
   opts?.configure?.(session);
-  const peer = new XacppPeer(EMPTY_CAPS, transport, acceptNegotiate, unusedEstablish, session);
+  const peer = new XacppPeer(FETCH_CAPS, transport, acceptNegotiate, unusedEstablish, session);
   await peer.connect();
   await peer.negotiate();
   const handler: XacppSessionHandler = opts?.onCommandOverride

@@ -223,6 +223,9 @@ const INTEROP_CAPS: Capabilities = {
   commands: [{ name: "new_activity" }, { name: "invoke_activity" }],
   produceEvents: [{ name: "content_delta" }, { name: "complete" }],
   acceptEvents: [],
+  // This harness exercises the fetch family (SPEC §8.7): the declaration
+  // is the application's own decision, made here by the test harness.
+  fetchExt: 1,
 };
 
 // ---- Suite ----

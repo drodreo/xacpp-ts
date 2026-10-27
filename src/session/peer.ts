@@ -74,6 +74,13 @@ export class XacppPeer {
   private negotiateHandler: NegotiateHandler;
   private _remoteCapabilities: Capabilities = { commands: [], produceEvents: [], acceptEvents: [] };
   private _emitEvents: string[] = [];
+  /**
+   * 协商后的 fetch 事实（SPEC §8.7）：本端与对端都声明 fetchExt 于支持版本
+   * 时为 true。两侧在 negotiate 完成时更新；disconnect 清除。入站
+   * fetch-family 路由用它 + handler.isFetchResponder 双重门控；initiator
+   * 侧经它把事实回填到（含 establish 换代新建的）session。
+   */
+  private negotiatedFetchEnabled = false;
 
   constructor(
     capabilities: Capabilities,
@@ -129,6 +136,7 @@ export class XacppPeer {
             const remoteCaps = payload.payload.negotiate.capabilities;
             const effective = computeEffectiveCapabilities(capabilities, remoteCaps);
             self._emitEvents = effective.emitEvents;
+            self.negotiatedFetchEnabled = effective.fetchEnabled;
             await negotiateHandler.onNegotiate(effective);
             return { kind: "negotiated" as const, capabilities };
           }
@@ -159,16 +167,19 @@ export class XacppPeer {
         }
 
         if (payload.kind === "command") {
-          // Fetch-family commands are gated (SPEC §8.2): with no loaded
-          // fetch responder the library answers `fetch_unavailable`
-          // loudly — never a silent fall-through to the consumer. A
-          // loaded responder receives the commands untouched (the fetch
-          // kernel stays stateless).
-          if (isFetchFamily(payload.payload) && !handler.isFetchResponder) {
+          // Fetch-family commands are gated on BOTH conditions (SPEC
+          // §8.2/§8.7): the negotiation must have enabled fetch (both
+          // sides declared fetchExt at the supported version) AND this
+          // session's handler must declare a fetch responder. Either
+          // condition unmet ⇒ the library answers `fetch_unavailable`
+          // loudly — never a silent fall-through to the consumer. When
+          // both hold, the commands reach the handler untouched (the
+          // fetch kernel stays stateless).
+          if (isFetchFamily(payload.payload) && !(self.negotiatedFetchEnabled && handler.isFetchResponder)) {
             return {
               kind: "error" as const,
               code: FETCH_UNAVAILABLE,
-              message: "fetch unsupported on this end (no fetch responder loaded)",
+              message: "fetch unsupported on this end (not negotiated or no fetch responder loaded)",
             };
           }
           return handler.onCommand(payload.payload);
@@ -217,7 +228,9 @@ export class XacppPeer {
       this._remoteCapabilities = response.capabilities;
       const effective = computeEffectiveCapabilities(this.capabilities, response.capabilities);
       this._emitEvents = effective.emitEvents;
+      this.negotiatedFetchEnabled = effective.fetchEnabled;
       this.session?.setEmitEvents(effective.emitEvents);
+      this.session?.setFetchEnabled(effective.fetchEnabled);
       await this.negotiateHandler.onNegotiate(effective);
       this._state = PeerState.Negotiated;
       return;
@@ -309,6 +322,8 @@ export class XacppPeer {
     this.sessions.clear();
     this._remoteCapabilities = { commands: [], produceEvents: [], acceptEvents: [] };
     this._emitEvents = [];
+    this.negotiatedFetchEnabled = false;
+    this.session?.setFetchEnabled(false);
   }
 
   /**
@@ -339,6 +354,10 @@ export class XacppPeer {
     }
     this.session?.detachTransfer();
     const fresh = new XacppSession();
+    // The fresh session belongs to THIS connection's negotiation — the
+    // negotiated fetch fact carries over (same backfill the held session
+    // received at negotiate time).
+    fresh.setFetchEnabled(this.negotiatedFetchEnabled);
     if (wiring !== null) fresh.wire(wiring);
     return fresh;
   }
