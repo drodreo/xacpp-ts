@@ -4,9 +4,8 @@
  * adjudication, declaration retransmission.
  *
  * Real TCP only: the egress-flush window (a dead connection's queued bytes
- * keep arriving at the peer's reader) is the substance these tests pin —
- * see xacpp-tcp-resume-coverage-gap.md. Aligned with
- * xacpp-rs tests/socket_resume_tests.rs.
+ * keep arriving at the peer's reader) is the substance these tests pin.
+ * Aligned with xacpp-rs tests/socket_resume_tests.rs.
  */
 
 import { describe, it, expect } from "vitest";
