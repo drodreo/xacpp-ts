@@ -10,16 +10,18 @@ xacpp 定义了 Agent 与对端之间的通信协议。它提供了分层架构�
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  Peer（协议层）                                                │
-│  类型化操作 + 会话路由                                          │
+│  Peer（生命周期编排，发起方）                                    │
+│  negotiate → connect → establish → disconnect                │
 ├──────────────────────────────────────────────────────────────┤
-│  Session（会话层）                                             │
-│  独立会话上下文，直达 Transport 收发                              │
+│  Session（通信门面 + 传输状态）                                  │
+│  requestCommand / sendEvent / sendBinary；                    │
+│  持有 TransferSession（ACK/NACK/RESUME/心跳），                 │
+│  自行挂载到当前 transport                                       │
 ├──────────────────────────────────────────────────────────────┤
-│  Transport（传输层）                                           │
-│  信封装拆、id 关联、pending 匹配                                 │
+│  Transport（连接实体）                                         │
+│  物理 IO、二进制组帧、单一 FIFO 出口                             │
 ├──────────────────────────────────────────────────────────────┤
-│  Stdio / TCP / WebSocket                                     │
+│  Stdio / TCP                                                  │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -36,40 +38,53 @@ npm install xacpp
 ### 建立会话（发起方）
 
 ```typescript
-import { XacppPeer, XacppSession, StdioTransport, XacppSessionHandler, XacppResponse } from "xacpp";
+import {
+  XacppPeer, XacppSession, SocketTransport,
+  NegotiateHandler, EstablishHandler, XacppSessionHandler,
+} from "xacpp";
 
-// 创建 Transport + Peer
-const transport = new StdioTransport(process.stdout, process.stdin);
+// 会话持有自己的传输状态：独立于任何连接创建，随连接的建立与断开
+// 自行挂载到传输上。
+const session = new XacppSession(); // TransferConfig::default()
 
-const peer = new XacppPeer(transport, {
-  async onEstablish(transport, credentials) {
-    return { sessionId: "server-session", handler: mySessionHandler };
-  },
-});
+const transport = SocketTransport.connectTo(8080, "127.0.0.1");
 
+// Peer 编排生命周期，并在 connect 时自动挂载会话。
+// capabilities 的 fetchExt 字段声明 fetch 扩展支持（SPEC §8.7），
+// 省略则禁用 fetch。
+const peer = new XacppPeer(
+  { commands: [], produceEvents: [], acceptEvents: [] }, // capabilities
+  transport,
+  negotiateHandler,
+  establishHandler,
+  session,
+);
 await peer.connect();
 
-// 建立逻辑会话
-const session = await peer.establish(null, mySessionHandler);
+// 建立逻辑会话（向会话填充身份/可发事件）。
+await peer.establish(undefined, mySessionHandler, () => {});
 
-// 通过会话发送命令/事件
+// 经会话门面发送命令/事件/二进制。
 const response = await session.requestCommand("new_activity");
-await session.requestEvent({ type: "think", content: "Hello!" });
+await session.sendEvent({ type: "think", content: "Hello!" });
+const txid = session.sendBinary(payload, (result) => {
+  /* BinarySendResult: 恰好一次的终态 */
+});
 ```
 
-### 处理入站请求（响应方）
+### 处理入站连接（响应方）
 
 ```typescript
-const sessionHandler: XacppSessionHandler = {
-  async onCommand(command) {
-    // 处理命令
-    return { kind: "acknowledge" };
-  },
-  async onEvent(event) {
-    // 处理事件
-    return { kind: "acknowledge" };
-  },
-};
+// 响应方没有 Peer：accept 连接、创建会话、重连时恢复身份，
+// 然后把会话挂载到传输上。
+const session = new XacppSession();
+session.bindIdentity("session-1", credentials);
+session.wire(transport); // 关闭时自动卸载
+session.onBinary((txid, payload) => { /* 消费二进制 */ });
+
+transport.onRequest((_sessionId, payload) => {
+  // 对入站命令/事件返回 XacppResponse
+});
 ```
 
 ### TCP 传输（网络通信）
@@ -90,15 +105,15 @@ const server = new SocketTransport(acceptedSocket);
 
 | 类型 | 说明 |
 |------|------|
-| `XacppTransport` | 传输层接口（`connect`、`disconnect`、`send`、`onRequest`） |
-| `XacppPeer` | 协议端点，含会话路由 |
-| `XacppSession` | 逻辑会话，直达 Transport 收发 |
+| `XacppPeer` | 生命周期编排（negotiate/connect/establish/disconnect）；connect 时自动把会话挂载到传输（发起方） |
+| `XacppSession` | 通信门面（`requestCommand`/`sendEvent`/`sendBinary`）；持有传输状态、跨重连存活，`wire`/`unwire` 挂载到传输 |
+| `TransferSession` | 传输事务状态机（ACK/NACK/RESUME/心跳/背压）；由 `XacppSession` 持有 |
+| `TransferConfig` | 传输调优（心跳间隔、静默超时、ACK 批量、tick） |
+| `XacppTransport` | 连接实体：物理 IO、二进制组帧、单一 FIFO 出口 |
 | `XacppSessionHandler` | 处理会话内的入站 Command/Event |
-| `EstablishHandler` | 处理 Establish 握手请求 |
-| `XacppCommand` | 协议命令（`establish`、`new_activity` 等） |
+| `NegotiateHandler` / `EstablishHandler` | 握手处理器 |
+| `XacppCommand` / `XacppEvent` | 协议命令与事件 |
 | `ActivityRef` | 命令/事件信封共用的活动标识引用（`{id}`） |
-| `XacppEvent` | 协议事件（think、content_delta、pair_complete 等） |
-| `XacppRequest` | 请求载荷（`command` 或 `event`） |
 | `XacppResponse` | 响应载荷（`established`、`acknowledge`、`action` 等） |
 | `XacppError` | 错误类，含机器可读错误码 |
 | `PeerState` | Peer 状态枚举（`Disconnected`、`Connected`） |
@@ -107,7 +122,7 @@ const server = new SocketTransport(acceptedSocket);
 
 | 类 | 说明 |
 |---|------|
-| `StdioTransport` | stdin/stdout JSONL 管道 |
+| `StdioTransport` | stdin/stdout 二进制帧管道 |
 | `SocketTransport` | TCP socket（`net.Socket`），spawn-per-request 并发模型 |
 
 ## 线路协议
